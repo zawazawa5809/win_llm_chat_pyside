@@ -230,6 +230,8 @@ class MainWindow(QMainWindow):
             self._worker_thread = None
             self._worker = None
             self._set_busy(False)
+            # UI 再有効化後にフォーカスを入力欄へ戻す
+            self.input_field.setFocus()
 
     # Worker コールバック
     def _on_worker_succeeded(self, content: str, elapsed_ms: int):
