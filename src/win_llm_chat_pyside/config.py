@@ -19,6 +19,9 @@ class Config:
     # UI/ネットワーク拡張（既定値で後方互換）
     request_timeout_ms: int = 30000
     connect_timeout_ms: int = 10000
+    # ストリーミング用の個別タイムアウト（未設定時は上記を流用）
+    stream_total_timeout_ms: int = 30000
+    stream_connect_timeout_ms: int = 5000
     ui_enter_to_send: bool = False
     ui_ctrl_enter_to_send: bool = True
     ui_autoscroll_enabled: bool = True
@@ -26,6 +29,9 @@ class Config:
     ui_markdown_font_family: str = "Segoe UI"
     ui_markdown_font_size_pt: int = 11
     ui_markdown_line_height: float = 1.6
+    # ストリーミング UI
+    ui_streaming_stop_enabled: bool = True
+    ui_streaming_chunk_render_interval_ms: int = 0
     
     def validate(self) -> tuple[bool, Optional[str]]:
         """

@@ -71,3 +71,41 @@ class ChatWorker(QObject):
         return "予期しないエラーが発生しました"
 
 
+class StreamChatWorker(QObject):
+    """LLM ストリーミング処理を別スレッドで実行するワーカー。"""
+
+    stream_chunk = Signal(str)  # delta text
+    stream_finished = Signal(int)  # elapsed_ms
+    failed = Signal(str, str, int)  # user_message, detail, elapsed_ms
+
+    def __init__(self, client, messages: List[Message]):
+        super().__init__()
+        self._client = client
+        self._messages = messages
+        self._cancelled = False
+
+    def cancel(self) -> None:
+        """ストリーム処理の中断要求をセットする。"""
+        self._cancelled = True
+
+    def _map_error_to_user_message(self, error: Exception) -> str:
+        # 既存のマッピングを再利用
+        return ChatWorker._map_error_to_user_message(error)
+
+    def run(self) -> None:
+        """ストリーム処理を実行する。"""
+        start = perf_counter()
+        try:
+            # iter_chat は非対応時に一括応答へフォールバックする実装
+            for delta in self._client.iter_chat(self._messages):
+                if self._cancelled:
+                    break
+                if delta:
+                    self.stream_chunk.emit(delta)
+            elapsed_ms = int((perf_counter() - start) * 1000)
+            self.stream_finished.emit(elapsed_ms)
+        except Exception as e:  # noqa: BLE001
+            elapsed_ms = int((perf_counter() - start) * 1000)
+            user_message = self._map_error_to_user_message(e)
+            self.failed.emit(user_message, repr(e), elapsed_ms)
+

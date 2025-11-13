@@ -15,7 +15,7 @@ from PySide6.QtGui import QTextCursor
 from .models import Message
 from .config import Config, load_config, save_config
 from .client import OpenAiCompatibleClient, LlmClientError
-from .workers import ChatWorker
+from .workers import ChatWorker, StreamChatWorker
 
 
 class MainWindow(QMainWindow):
@@ -32,7 +32,8 @@ class MainWindow(QMainWindow):
         self.llm_client: Optional[OpenAiCompatibleClient] = None
         self._sending: bool = False
         self._worker_thread: Optional[QThread] = None
-        self._worker: Optional[ChatWorker] = None
+        self._worker: Optional[QObject] = None
+        self._stop_button: Optional[QPushButton] = None
         self._initialize_client()
         
         # UI構築
@@ -45,8 +46,11 @@ class MainWindow(QMainWindow):
         is_valid, error_msg = self.config.validate()
         if is_valid:
             # timeout は秒または (connect, read) 秒タプルで渡す
-            connect_s = max(0.1, self.config.connect_timeout_ms / 1000.0)
-            read_s = max(0.1, self.config.request_timeout_ms / 1000.0)
+            # ストリーミング個別設定がある場合はそれを優先
+            connect_ms = getattr(self.config, "stream_connect_timeout_ms", self.config.connect_timeout_ms)
+            total_ms = getattr(self.config, "stream_total_timeout_ms", self.config.request_timeout_ms)
+            connect_s = max(0.1, connect_ms / 1000.0)
+            read_s = max(0.1, total_ms / 1000.0)
             self.llm_client = OpenAiCompatibleClient(
                 base_url=self.config.base_url,
                 model=self.config.model,
@@ -81,6 +85,12 @@ class MainWindow(QMainWindow):
         self.send_button = QPushButton("送信")
         self.send_button.clicked.connect(self._on_send_clicked)
         input_layout.addWidget(self.send_button, stretch=1)
+
+        # 応答停止ボタン（任意）。最初は無効化
+        self._stop_button = QPushButton("停止")
+        self._stop_button.setEnabled(False)
+        self._stop_button.clicked.connect(self._on_stop_clicked)
+        input_layout.addWidget(self._stop_button)
         
         layout.addLayout(input_layout)
 
@@ -125,8 +135,14 @@ class MainWindow(QMainWindow):
         self._update_chat_view()
         self._scroll_to_end()
 
-        # Worker 起動
-        self._start_worker()
+        # アシスタント空メッセージを先行追加（逐次追記の受け皿）
+        assistant_placeholder = Message(role="assistant", content="")
+        self.messages.append(assistant_placeholder)
+        self._update_chat_view()
+        self._scroll_to_end()
+
+        # ストリーミング Worker 起動
+        self._start_stream_worker()
     
     def _update_chat_view(self):
         """メッセージリストから Markdown を生成してビューを更新する。"""
@@ -197,6 +213,9 @@ class MainWindow(QMainWindow):
         self._sending = busy
         self.send_button.setEnabled(not busy)
         self.input_field.setEnabled(not busy)
+        if self._stop_button:
+            # 停止ボタンは busy 中のみ有効（設定で制御）
+            self._stop_button.setEnabled(bool(busy and getattr(self.config, "ui_streaming_stop_enabled", True)))
         if busy:
             self.statusBar().showMessage("応答待ち…")
             self.send_button.setText("送信中…")
@@ -232,6 +251,46 @@ class MainWindow(QMainWindow):
             self._set_busy(False)
             # UI 再有効化後にフォーカスを入力欄へ戻す
             self.input_field.setFocus()
+
+    # Streaming 用
+    def _start_stream_worker(self):
+        """バックグラウンドでストリーミング送信を開始する。"""
+        messages_snapshot = list(self.messages)
+        self._worker_thread = QThread(self)
+        worker = StreamChatWorker(self.llm_client, messages_snapshot)  # type: ignore[arg-type]
+        self._worker = worker
+        worker.moveToThread(self._worker_thread)
+
+        self._worker_thread.started.connect(worker.run)
+        worker.stream_chunk.connect(self._on_stream_chunk)
+        worker.stream_finished.connect(self._on_stream_finished)
+        worker.failed.connect(self._on_worker_failed)
+        worker.stream_finished.connect(self._cleanup_worker)
+        worker.failed.connect(self._cleanup_worker)
+        self._worker_thread.start()
+
+    def _on_stream_chunk(self, delta: str):
+        """ストリームのチャンクをアシスタント最新メッセージへ追記する。"""
+        if not self.messages or self.messages[-1].role != "assistant":
+            # 想定外だが安全側で補正
+            self.messages.append(Message(role="assistant", content=""))
+        self.messages[-1].content += delta
+        self._update_chat_view()
+        if self.config.ui_autoscroll_enabled:
+            self._scroll_to_end()
+
+    def _on_stream_finished(self, elapsed_ms: int):
+        print(f"[stream] finished in {elapsed_ms} ms")
+        self.input_field.clear()
+
+    def _on_stop_clicked(self):
+        """停止ボタン押下でストリームを中断する。"""
+        try:
+            # StreamChatWorker にだけ存在
+            if hasattr(self._worker, "cancel"):
+                getattr(self._worker, "cancel")()
+        except Exception:
+            pass
 
     # Worker コールバック
     def _on_worker_succeeded(self, content: str, elapsed_ms: int):

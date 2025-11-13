@@ -62,6 +62,34 @@ pyinstaller build.spec
 
 - 保存先: `%APPDATA%\win-llm-chat-pyside\config.json`
 
+### 主な設定キー
+
+- 接続
+  - `base_url`: エンドポイントのベース URL（例: `http://localhost:11434`）
+  - `model`: モデル名（例: `llama3`）
+  - `api_key`: 必要に応じて設定（OpenAI 互換など）
+- タイムアウト
+  - `connect_timeout_ms`: 通常接続タイムアウト（既定 10000）
+  - `request_timeout_ms`: 通常リードタイムアウト（既定 30000）
+  - `stream_connect_timeout_ms`: ストリーミング接続タイムアウト（既定 5000）
+  - `stream_total_timeout_ms`: ストリーミング全体タイムアウト（既定 30000）
+- UI
+  - `ui_ctrl_enter_to_send`: Ctrl+Enter で送信（既定 true）
+  - `ui_enter_to_send`: Enter で送信（既定 false）
+  - `ui_autoscroll_enabled`: 自動スクロール（既定 true）
+  - `ui_streaming_stop_enabled`: 「停止」ボタン有効（既定 true）
+  - `ui_markdown_*`: フォント/サイズ/行間など
+
+### 既知の制約・注意事項
+
+- ストリーミング
+  - OpenAI 互換は SSE（`data:` 行）、Ollama は JSON Lines。両方 UTF-8 前提で処理
+  - サーバが文字コードを誤報告する場合は `utf-8` に強制デコードして処理
+  - ネットワーク断や不正フレームは安全側でスキップし、最終的にエラー通知
+- UI
+  - 非対応エンドポイントは一括応答にフォールバック
+  - 停止ボタンはストリーム処理に対する中断要求（即時停止を保証しない）
+
 ## ライセンス
 
 MIT License
