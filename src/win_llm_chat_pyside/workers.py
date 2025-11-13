@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from time import perf_counter
 from typing import List
+from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -109,3 +110,43 @@ class StreamChatWorker(QObject):
             user_message = self._map_error_to_user_message(e)
             self.failed.emit(user_message, repr(e), elapsed_ms)
 
+
+class LoadSessionWorker(QObject):
+    """セッション読み込みを別スレッドで実行するワーカー。"""
+
+    succeeded = Signal(list)  # messages: List[Message]
+    failed = Signal(str)  # detail
+
+    def __init__(self, path: Path):
+        super().__init__()
+        self._path = path
+
+    @Slot()
+    def run(self) -> None:
+        from .storage import load_session_safe
+        try:
+            messages = load_session_safe(self._path)
+            self.succeeded.emit(messages)  # type: ignore[arg-type]
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(repr(e))
+
+
+class SaveSessionWorker(QObject):
+    """セッション保存を別スレッドで実行するワーカー。"""
+
+    succeeded = Signal()
+    failed = Signal(str)  # detail
+
+    def __init__(self, path: Path, messages: List[Message]):
+        super().__init__()
+        self._path = path
+        self._messages = messages
+
+    @Slot()
+    def run(self) -> None:
+        from .storage import save_session_atomic
+        try:
+            save_session_atomic(self._messages, self._path)
+            self.succeeded.emit()
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(repr(e))

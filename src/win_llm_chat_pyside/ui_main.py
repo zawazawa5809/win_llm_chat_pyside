@@ -6,16 +6,17 @@ from typing import Optional
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextBrowser, QPlainTextEdit, QPushButton, QMenuBar,
-    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox,
+    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox, QFileDialog,
     QMessageBox
 )
 from PySide6.QtCore import Qt, QObject, QEvent, QThread
 from PySide6.QtGui import QTextCursor
 
 from .models import Message
-from .config import Config, load_config, save_config
+from .config import Config, load_config, save_config, get_default_history_path
 from .client import OpenAiCompatibleClient, LlmClientError
-from .workers import ChatWorker, StreamChatWorker
+from .workers import ChatWorker, StreamChatWorker, LoadSessionWorker
+from . import storage
 
 
 class MainWindow(QMainWindow):
@@ -33,6 +34,8 @@ class MainWindow(QMainWindow):
         self._sending: bool = False
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[QObject] = None
+        self._io_thread: Optional[QThread] = None
+        self._io_worker: Optional[QObject] = None
         self._stop_button: Optional[QPushButton] = None
         self._initialize_client()
         
@@ -40,6 +43,8 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._setup_menu()
         self._apply_markdown_style()
+        # 起動時ロード（設定が有効なら）
+        self._load_session_if_available()
         
     def _initialize_client(self):
         """設定から LLM クライアントを初期化する。"""
@@ -100,6 +105,10 @@ class MainWindow(QMainWindow):
     def _setup_menu(self):
         """メニューバーを設定する。"""
         menubar = self.menuBar()
+        file_menu = menubar.addMenu("ファイル")
+        export_action = file_menu.addAction("この会話をMarkdownで保存…")
+        export_action.triggered.connect(self._export_markdown_dialog)
+
         settings_menu = menubar.addMenu("設定")
         
         settings_action = settings_menu.addAction("接続設定...")
@@ -109,6 +118,9 @@ class MainWindow(QMainWindow):
         """送信ボタンがクリックされたときの処理。"""
         if self._sending:
             return
+
+        # 履歴のサイズ警告（非ブロッキング）
+        self._check_history_limits()
 
         user_input = self.input_field.toPlainText().strip()
         if not user_input:
@@ -324,6 +336,110 @@ class MainWindow(QMainWindow):
                 self._on_send_clicked()
                 return True
         return super().eventFilter(obj, event)
+
+    # ---- v0.4: 履歴のロード/セーブ/エクスポート ----
+    def _history_path(self) -> str:
+        """履歴の保存先パス（文字列）を取得する。"""
+        cfg_path = getattr(self.config, "history_path", None)
+        if cfg_path:
+            return cfg_path  # type: ignore[return-value]
+        base = get_default_history_path()
+        fmt = getattr(self.config, "history_format", "json")
+        if fmt == "markdown":
+            base = base.with_suffix(".md")
+        return str(base)
+
+    def _load_session_if_available(self) -> None:
+        """起動時にセッションを自動ロードする（有効時）。"""
+        if not getattr(self.config, "history_enabled", True):
+            return
+        from pathlib import Path as _P
+        p = _P(self._history_path())
+        if not p.exists():
+            return
+        # 非ブロッキングでロード
+        self._io_thread = QThread(self)
+        worker = LoadSessionWorker(p)
+        self._io_worker = worker
+        worker.moveToThread(self._io_thread)
+        self._io_thread.started.connect(worker.run)
+        worker.succeeded.connect(self._on_load_succeeded)
+        worker.failed.connect(self._on_load_failed)
+        worker.succeeded.connect(self._cleanup_io_worker)
+        worker.failed.connect(self._cleanup_io_worker)
+        self._io_thread.start()
+
+    def _cleanup_io_worker(self, *args):
+        try:
+            if self._io_thread and self._io_thread.isRunning():
+                self._io_thread.quit()
+                self._io_thread.wait(2000)
+        finally:
+            self._io_thread = None
+            self._io_worker = None
+
+    def _on_load_succeeded(self, loaded_messages: list):
+        try:
+            if loaded_messages:
+                # list[dict] の場合にも対応（安全側）
+                msgs: list[Message] = []
+                for item in loaded_messages:
+                    if isinstance(item, Message):
+                        msgs.append(item)
+                    elif isinstance(item, dict):
+                        msgs.append(Message.from_dict(item))
+                if msgs:
+                    self.messages = msgs
+                    self._update_chat_view()
+                    self.statusBar().showMessage("前回の会話を読み込みました", 3000)
+        except Exception:
+            QMessageBox.information(self, "履歴の読み込み", "前回の会話を読み込めませんでした。新規セッションで開始します。")
+
+    def _on_load_failed(self, detail: str):
+        QMessageBox.information(self, "履歴の読み込み", "前回の会話を読み込めませんでした。新規セッションで開始します。")
+
+    def _check_history_limits(self) -> None:
+        """履歴のソフト上限を超えた場合に非ブロッキングで通知する。"""
+        max_msgs = int(getattr(self.config, "history_max_messages", 400) or 400)
+        max_chars = int(getattr(self.config, "history_max_chars", 200000) or 200000)
+        num_msgs, total_chars = storage.calculate_history_size(self.messages)
+        if num_msgs > max_msgs or total_chars > max_chars:
+            self.statusBar().showMessage("履歴が大きくなっています。保存/エクスポート前に見直しを検討してください。", 5000)
+
+    def closeEvent(self, event):  # noqa: N802 - Qt 既定名
+        """ウィンドウクローズ時にセッションを保存する。"""
+        try:
+            if getattr(self.config, "history_enabled", True):
+                self._check_history_limits()
+                from pathlib import Path as _P
+                p = _P(self._history_path())
+                fmt = getattr(self.config, "history_format", "json")
+                if fmt == "markdown":
+                    storage.export_markdown_file(self.messages, p, metadata={"model": self.config.model})
+                else:
+                    storage.save_session_atomic(self.messages, p)
+        except Exception:
+            QMessageBox.warning(self, "保存エラー", "セッションの保存に失敗しました。")
+        finally:
+            super().closeEvent(event)
+
+    def _export_markdown_dialog(self) -> None:
+        """Markdown エクスポートのためのファイル保存ダイアログを開く。"""
+        default_dir = getattr(self.config, "export_default_dir", None)
+        pattern = getattr(self.config, "export_filename_pattern", "Chat-{yyyy-MM-dd HH-mm}.md")
+        from datetime import datetime
+        safe_name = pattern.replace("{yyyy-MM-dd HH-mm}", datetime.now().strftime("%Y-%m-%d %H-%M"))
+        initial_path = f"{default_dir or ''}/{safe_name}" if default_dir else safe_name
+        path, _ = QFileDialog.getSaveFileName(self, "Markdown で保存", initial_path, "Markdown (*.md)")
+        if not path:
+            return
+        try:
+            meta = {"model": self.config.model}
+            from pathlib import Path as _P
+            storage.export_markdown_file(self.messages, _P(path), metadata=meta)
+            self.statusBar().showMessage("Markdown を保存しました", 3000)
+        except Exception as e:
+            QMessageBox.warning(self, "エクスポート失敗", f"Markdown の保存に失敗しました:\n{e}")
 
 
 class SettingsDialog(QDialog):

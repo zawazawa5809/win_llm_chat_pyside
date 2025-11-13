@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Literal
 
 
 @dataclass
@@ -32,6 +32,15 @@ class Config:
     # ストリーミング UI
     ui_streaming_stop_enabled: bool = True
     ui_streaming_chunk_render_interval_ms: int = 0
+
+    # 履歴保存/エクスポート（v0.4）
+    history_enabled: bool = True
+    history_format: Literal["json", "markdown"] = "json"
+    history_path: Optional[str] = None  # 既定はアプリデータ配下
+    history_max_messages: int = 400
+    history_max_chars: int = 200_000
+    export_default_dir: Optional[str] = None
+    export_filename_pattern: str = "Chat-{yyyy-MM-dd HH-mm}.md"
     
     def validate(self) -> tuple[bool, Optional[str]]:
         """
@@ -58,18 +67,33 @@ def get_config_path() -> Path:
     
     Windows の場合は %APPDATA%/win-llm-chat-pyside/config.json
     """
-    if os.name == "nt":  # Windows
-        appdata = os.getenv("APPDATA")
-        if not appdata:
-            raise RuntimeError("APPDATA 環境変数が設定されていません")
-        config_dir = Path(appdata) / "win-llm-chat-pyside"
-    else:
-        # Linux/Mac の場合（将来の拡張用）
-        config_dir = Path.home() / ".config" / "win-llm-chat-pyside"
+    config_dir = get_data_dir()
     
     config_dir.mkdir(parents=True, exist_ok=True)
     return config_dir / "config.json"
 
+def get_data_dir() -> Path:
+    """
+    アプリケーションのデータディレクトリを返す。
+    Windows: %APPDATA%/win-llm-chat-pyside
+    """
+    if os.name == "nt":  # Windows
+        appdata = os.getenv("APPDATA")
+        if not appdata:
+            raise RuntimeError("APPDATA 環境変数が設定されていません")
+        return Path(appdata) / "win-llm-chat-pyside"
+    # Linux/Mac（将来拡張）
+    return Path.home() / ".config" / "win-llm-chat-pyside"
+
+def get_default_history_path() -> Path:
+    """
+    既定の履歴保存パス（単一セッション）を返す。
+    例: %APPDATA%/win-llm-chat-pyside/history/session.json
+    """
+    base = get_data_dir()
+    history_dir = base / "history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+    return history_dir / "session.json"
 
 def load_config() -> Config:
     """
