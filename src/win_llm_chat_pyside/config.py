@@ -56,6 +56,13 @@ class Config:
     history_max_chars: int = 200_000
     export_default_dir: Optional[str] = None
     export_filename_pattern: str = "Chat-{yyyy-MM-dd HH-mm}.md"
+    # 観測性（v0.6）
+    logging_enabled: bool = True
+    logging_level: str = "info"
+    logging_dir: Optional[str] = None  # 既定はアプリデータ配下の logs ディレクトリ
+    logging_max_file_size_mb: int = 5
+    logging_rotation_keep_files: int = 5
+    diagnostics_show_env_details: bool = False
     
     def validate(self) -> tuple[bool, Optional[str]]:
         """
@@ -114,6 +121,17 @@ def get_default_history_path() -> Path:
     history_dir = base / "history"
     history_dir.mkdir(parents=True, exist_ok=True)
     return history_dir / "session.json"
+
+
+def get_default_logs_dir() -> Path:
+    """
+    ログファイルの既定ディレクトリを返す。
+    例: %APPDATA%/win-llm-chat-pyside/logs
+    """
+    base = get_data_dir()
+    logs_dir = base / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    return logs_dir
 
 def load_config() -> Config:
     """
@@ -210,6 +228,12 @@ def _config_from_dict(data: dict) -> Config:
         history_max_chars=int(data.get("history_max_chars", 200_000)),
         export_default_dir=data.get("export_default_dir"),
         export_filename_pattern=data.get("export_filename_pattern", "Chat-{yyyy-MM-dd HH-mm}.md"),
+        logging_enabled=bool(data.get("logging_enabled", True)),
+        logging_level=str(data.get("logging_level", "info")),
+        logging_dir=data.get("logging_dir"),
+        logging_max_file_size_mb=int(data.get("logging_max_file_size_mb", 5)),
+        logging_rotation_keep_files=int(data.get("logging_rotation_keep_files", 5)),
+        diagnostics_show_env_details=bool(data.get("diagnostics_show_env_details", False)),
     )
     return cfg
 

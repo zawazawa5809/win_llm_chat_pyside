@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox, QFileDialog,
     QMessageBox, QComboBox, QLabel
 )
-from PySide6.QtCore import Qt, QObject, QEvent, QThread
-from PySide6.QtGui import QTextCursor
+from PySide6.QtCore import Qt, QObject, QEvent, QThread, QUrl
+from PySide6.QtGui import QTextCursor, QDesktopServices, QGuiApplication
 
 from .models import Message
 from .config import Config, load_config, save_config, get_default_history_path, get_current_profile, Profile, validate_profile
@@ -18,6 +18,8 @@ from .client import OpenAiCompatibleClient, LlmClientError
 from .workers import ChatWorker, StreamChatWorker, LoadSessionWorker
 from . import storage
 from .factory import create_llm_client
+from .app_logger import app_logger
+from .diagnostics import DiagnosticsInfoProvider
 
 
 class MainWindow(QMainWindow):
@@ -31,6 +33,13 @@ class MainWindow(QMainWindow):
         # 内部状態
         self.messages: list[Message] = []
         self.config = load_config()
+        # ロガー初期化（Config 反映）
+        try:
+            app_logger.configure(self.config)
+            app_logger.info("app.start", {"profile_name": self.config.current_profile_name or ""})
+        except Exception:
+            # ログ初期化失敗はアプリ動作のブロッカーにはしない
+            pass
         self.llm_client: Optional[OpenAiCompatibleClient] = None
         self._sending: bool = False
         self._worker_thread: Optional[QThread] = None
@@ -130,9 +139,18 @@ class MainWindow(QMainWindow):
         export_action.triggered.connect(self._export_markdown_dialog)
 
         settings_menu = menubar.addMenu("設定")
-        
+
         settings_action = settings_menu.addAction("プロファイル設定...")
         settings_action.triggered.connect(self._open_settings_dialog)
+
+        logging_action = settings_menu.addAction("ログ/診断設定...")
+        logging_action.triggered.connect(self._open_logging_settings_dialog)
+
+        help_menu = menubar.addMenu("ヘルプ")
+        logs_action = help_menu.addAction("ログフォルダを開く")
+        logs_action.triggered.connect(self._open_logs_folder)
+        diag_action = help_menu.addAction("診断情報...")
+        diag_action.triggered.connect(self._show_diagnostics_dialog)
 
     def _refresh_profile_combo(self) -> None:
         if not self._profile_combo:
@@ -162,6 +180,12 @@ class MainWindow(QMainWindow):
         # 反映
         self.config.current_profile_name = name
         save_config(self.config)
+        # ロガーの設定も更新
+        try:
+            app_logger.configure(self.config)
+            app_logger.info("config.profile_changed", {"profile_name": name})
+        except Exception:
+            pass
         self._initialize_client()
         self.statusBar().showMessage(f"プロファイルを切り替えました: {name}", 3000)
         
@@ -265,11 +289,29 @@ class MainWindow(QMainWindow):
             # 更新後の config を取得・保存
             self.config = dialog.get_config()
             save_config(self.config)
+            try:
+                app_logger.configure(self.config)
+                app_logger.info("config.updated", {"profile_name": self.config.current_profile_name or ""})
+            except Exception:
+                pass
             # ドロップダウン更新とクライアント再初期化
             self._refresh_profile_combo()
             self._initialize_client()
-            
+
             QMessageBox.information(self, "設定", "プロファイル設定を保存しました。")
+
+    def _open_logging_settings_dialog(self) -> None:
+        """ログ/診断設定ダイアログを開く。"""
+        dialog = LoggingSettingsDialog(self, self.config)
+        if dialog.exec() == QDialog.Accepted:
+            self.config = dialog.get_config()
+            save_config(self.config)
+            try:
+                app_logger.configure(self.config)
+                app_logger.info("config.logging_updated", {"logging_enabled": self.config.logging_enabled})
+            except Exception:
+                pass
+            QMessageBox.information(self, "設定", "ログ/診断設定を保存しました。")
 
     def _set_busy(self, busy: bool):
         """送信中 UI ロックとインジケータ制御。"""
@@ -343,7 +385,16 @@ class MainWindow(QMainWindow):
             self._scroll_to_end()
 
     def _on_stream_finished(self, elapsed_ms: int):
-        print(f"[stream] finished in {elapsed_ms} ms")
+        try:
+            app_logger.info(
+                "chat.stream.finished",
+                {
+                    "elapsed_ms": elapsed_ms,
+                    "profile_name": self.config.current_profile_name or "",
+                },
+            )
+        except Exception:
+            pass
         self.input_field.clear()
 
     def _on_stop_clicked(self):
@@ -357,7 +408,16 @@ class MainWindow(QMainWindow):
 
     # Worker コールバック
     def _on_worker_succeeded(self, content: str, elapsed_ms: int):
-        print(f"[send] succeeded in {elapsed_ms} ms")
+        try:
+            app_logger.info(
+                "chat.send.succeeded",
+                {
+                    "elapsed_ms": elapsed_ms,
+                    "profile_name": self.config.current_profile_name or "",
+                },
+            )
+        except Exception:
+            pass
         assistant_message = Message(role="assistant", content=content)
         self.messages.append(assistant_message)
         self._update_chat_view()
@@ -366,7 +426,17 @@ class MainWindow(QMainWindow):
         self.input_field.clear()
 
     def _on_worker_failed(self, user_message: str, detail: str, elapsed_ms: int):
-        print(f"[send] failed in {elapsed_ms} ms: {detail}")
+        try:
+            app_logger.error(
+                "chat.send.failed",
+                {
+                    "elapsed_ms": elapsed_ms,
+                    "profile_name": self.config.current_profile_name or "",
+                    "detail": detail,
+                },
+            )
+        except Exception:
+            pass
         QMessageBox.critical(self, "通信エラー", user_message)
 
     # キーバインド（Enter 改行 / Ctrl+Enter 送信）
@@ -472,6 +542,10 @@ class MainWindow(QMainWindow):
         except Exception:
             QMessageBox.warning(self, "保存エラー", "セッションの保存に失敗しました。")
         finally:
+            try:
+                app_logger.info("app.exit", {"profile_name": self.config.current_profile_name or ""})
+            except Exception:
+                pass
             super().closeEvent(event)
 
     def _export_markdown_dialog(self) -> None:
@@ -491,6 +565,53 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Markdown を保存しました", 3000)
         except Exception as e:
             QMessageBox.warning(self, "エクスポート失敗", f"Markdown の保存に失敗しました:\n{e}")
+
+    def _open_logs_folder(self) -> None:
+        """ログフォルダを OS のファイルエクスプローラで開く。"""
+        try:
+            path = app_logger.get_log_dir()
+            url = QUrl.fromLocalFile(str(path))
+            if not QDesktopServices.openUrl(url):
+                raise RuntimeError("ログフォルダを開けませんでした")
+            app_logger.info("logs.opened", {"path": str(path)})
+        except Exception as e:  # noqa: BLE001
+            try:
+                app_logger.error("logs.open_failed", {"error": str(e)})
+            except Exception:
+                pass
+            QMessageBox.warning(self, "ログフォルダ", "ログフォルダを開けませんでした。")
+
+    def _show_diagnostics_dialog(self) -> None:
+        """診断情報ダイアログを表示する。"""
+        provider = DiagnosticsInfoProvider(self.config)
+        info = provider.collect()
+        text = provider.format_text(info)
+        try:
+            app_logger.info("diagnostics.opened", {"profile_name": self.config.current_profile_name or ""})
+        except Exception:
+            pass
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("診断情報")
+        layout = QVBoxLayout(dialog)
+
+        text_edit = QPlainTextEdit()
+        text_edit.setReadOnly(True)
+        text_edit.setPlainText(text)
+        layout.addWidget(text_edit)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Close)
+        copy_button = QPushButton("コピー")
+        button_box.addButton(copy_button, QDialogButtonBox.ActionRole)
+        button_box.rejected.connect(dialog.reject)
+
+        def _copy() -> None:
+            QGuiApplication.clipboard().setText(text_edit.toPlainText())
+
+        copy_button.clicked.connect(_copy)
+        layout.addWidget(button_box)
+
+        dialog.exec()
 
 
 class SettingsDialog(QDialog):
@@ -678,4 +799,39 @@ class SettingsDialog(QDialog):
                 return False
         return True
 
+
+class LoggingSettingsDialog(QDialog):
+    """ログ/診断設定を編集するダイアログ。"""
+
+    def __init__(self, parent=None, config: Optional[Config] = None):
+        super().__init__(parent)
+        self.setWindowTitle("ログ/診断設定")
+        self.resize(360, 160)
+        self._config = config or Config()
+
+        layout = QFormLayout(self)
+
+        # ログ有効/無効
+        self.logging_enabled_checkbox = QCheckBox("ログを有効化（推奨）")
+        self.logging_enabled_checkbox.setChecked(bool(getattr(self._config, "logging_enabled", True)))
+        layout.addRow(self.logging_enabled_checkbox)
+
+        # 詳細な環境情報の含有（診断用）
+        self.env_details_checkbox = QCheckBox("診断情報に詳細な環境パスを含める")
+        self.env_details_checkbox.setChecked(bool(getattr(self._config, "diagnostics_show_env_details", False)))
+        layout.addRow(self.env_details_checkbox)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(self._on_accept)
+        button_box.rejected.connect(self.reject)
+        layout.addRow(button_box)
+
+    def _on_accept(self) -> None:
+        self._config.logging_enabled = self.logging_enabled_checkbox.isChecked()
+        self._config.diagnostics_show_env_details = self.env_details_checkbox.isChecked()
+        self.accept()
+
+    def get_config(self) -> Config:
+        """更新済み Config を返す。"""
+        return self._config
 
