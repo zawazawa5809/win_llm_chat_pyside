@@ -123,6 +123,19 @@ def get_default_history_path() -> Path:
     return history_dir / "session.json"
 
 
+def get_sessions_dir(config: Optional[Config] = None) -> Path:
+    """
+    マルチセッション保存用ディレクトリを返す。
+    履歴パスが設定されている場合はその親配下に sessions/ を作成する。
+    """
+    if config and config.history_path:
+        base = Path(config.history_path).expanduser().resolve().parent / "sessions"
+    else:
+        base = get_data_dir() / "sessions"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
+
+
 def get_default_logs_dir() -> Path:
     """
     ログファイルの既定ディレクトリを返す。

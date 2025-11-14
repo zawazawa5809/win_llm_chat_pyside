@@ -3,23 +3,37 @@ MainWindow と SettingsDialog を提供する GUI モジュール。
 """
 
 from typing import Optional
+from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextBrowser, QPlainTextEdit, QPushButton, QMenuBar,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox, QFileDialog,
-    QMessageBox, QComboBox, QLabel
+    QMessageBox, QComboBox, QLabel, QInputDialog, QTabWidget,
+    QSpinBox, QDoubleSpinBox
 )
 from PySide6.QtCore import Qt, QObject, QEvent, QThread, QUrl
 from PySide6.QtGui import QTextCursor, QDesktopServices, QGuiApplication
 
 from .models import Message
-from .config import Config, load_config, save_config, get_default_history_path, get_current_profile, Profile, validate_profile
+from .config import (
+    Config,
+    load_config,
+    save_config,
+    get_default_history_path,
+    get_current_profile,
+    Profile,
+    validate_profile,
+    get_sessions_dir,
+)
 from .client import OpenAiCompatibleClient, LlmClientError
-from .workers import ChatWorker, StreamChatWorker, LoadSessionWorker
+from .workers import ChatWorker, StreamChatWorker
 from . import storage
 from .factory import create_llm_client
 from .app_logger import app_logger
 from .diagnostics import DiagnosticsInfoProvider
+from .session_repository import SessionRepository
+from .session_manager import SessionManager
+from .session_widgets import SessionListPanel
 
 
 class MainWindow(QMainWindow):
@@ -44,18 +58,24 @@ class MainWindow(QMainWindow):
         self._sending: bool = False
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[QObject] = None
-        self._io_thread: Optional[QThread] = None
-        self._io_worker: Optional[QObject] = None
         self._stop_button: Optional[QPushButton] = None
         self._profile_combo: Optional[QComboBox] = None
+        self.session_panel: Optional[SessionListPanel] = None
+        sessions_dir = get_sessions_dir(self.config)
+        self._legacy_history_file = self._legacy_history_path()
+        self.session_repository = SessionRepository(sessions_dir)
+        self.session_manager = SessionManager(
+            repository=self.session_repository,
+            legacy_path=self._legacy_history_file,
+            persist=getattr(self.config, "history_enabled", True),
+        )
         self._initialize_client()
         
         # UI構築
         self._setup_ui()
         self._setup_menu()
         self._apply_markdown_style()
-        # 起動時ロード（設定が有効なら）
-        self._load_session_if_available()
+        self._initialize_sessions()
         
     def _initialize_client(self):
         """設定から LLM クライアントを初期化する。"""
@@ -89,7 +109,17 @@ class MainWindow(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         
-        layout = QVBoxLayout(central_widget)
+        root_layout = QHBoxLayout(central_widget)
+
+        self.session_panel = SessionListPanel(self)
+        self.session_panel.create_requested.connect(self._on_session_create_requested)
+        self.session_panel.rename_requested.connect(self._on_session_rename_requested)
+        self.session_panel.delete_requested.connect(self._on_session_delete_requested)
+        self.session_panel.session_selected.connect(self._on_session_selected)
+        root_layout.addWidget(self.session_panel, stretch=1)
+
+        layout = QVBoxLayout()
+        root_layout.addLayout(layout, stretch=3)
 
         # プロファイル選択バー
         top_bar = QHBoxLayout()
@@ -151,6 +181,92 @@ class MainWindow(QMainWindow):
         logs_action.triggered.connect(self._open_logs_folder)
         diag_action = help_menu.addAction("診断情報...")
         diag_action.triggered.connect(self._show_diagnostics_dialog)
+
+    def _initialize_sessions(self) -> None:
+        if not self.session_panel:
+            return
+        try:
+            metas = self.session_manager.initialize()
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "セッション", f"セッションの初期化に失敗しました。\n{exc}")
+            self.session_panel.set_sessions([], None)
+            return
+        active_id = self.session_manager.get_active_session_id()
+        self.session_panel.set_sessions(metas, active_id)
+        if active_id:
+            self._load_session_into_view(active_id, show_status=False)
+
+    def _load_session_into_view(self, session_id: str, show_status: bool = True) -> None:
+        try:
+            session = self.session_manager.load_session(session_id)
+            self.session_manager.set_active_session(session_id)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "セッション", f"セッションを読み込めませんでした。\n{exc}")
+            return
+        self.messages = [Message(role=m.role, content=m.content) for m in session.messages]
+        self._update_chat_view()
+        if show_status:
+            self.statusBar().showMessage(f"セッション「{session.name}」を開きました", 3000)
+
+    def _on_session_create_requested(self) -> None:
+        name, ok = QInputDialog.getText(self, "新規セッション", "セッション名（省略可）:")
+        if not ok:
+            return
+        name = name.strip()
+        session = self.session_manager.create_session(name or None)
+        metas = self.session_manager.list_sessions()
+        if self.session_panel:
+            self.session_panel.set_sessions(metas, session.id)
+        self._load_session_into_view(session.id)
+
+    def _on_session_rename_requested(self, session_id: str) -> None:
+        metas = {meta.id: meta for meta in self.session_manager.list_sessions()}
+        current_name = metas.get(session_id).name if session_id in metas else ""
+        new_name, ok = QInputDialog.getText(self, "セッション名の変更", "新しいセッション名:", text=current_name)
+        if not ok:
+            return
+        new_name = new_name.strip()
+        if not new_name:
+            QMessageBox.warning(self, "セッション", "セッション名を入力してください。")
+            return
+        self.session_manager.rename_session(session_id, new_name)
+        active_id = self.session_manager.get_active_session_id()
+        if self.session_panel:
+            self.session_panel.set_sessions(self.session_manager.list_sessions(), active_id)
+        self.statusBar().showMessage(f"セッション名を「{new_name}」に変更しました", 3000)
+
+    def _on_session_delete_requested(self, session_id: str) -> None:
+        if len(self.session_manager.list_sessions()) <= 1:
+            QMessageBox.information(self, "セッション", "最後のセッションは削除できません。")
+            return
+        confirm = QMessageBox.question(self, "セッション削除", "選択したセッションを削除しますか？")
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            new_active = self.session_manager.delete_session(session_id)
+        except ValueError as exc:
+            QMessageBox.warning(self, "セッション", str(exc))
+            return
+        active_id = new_active or (self.session_manager.list_sessions()[0].id if self.session_manager.list_sessions() else None)
+        if self.session_panel:
+            self.session_panel.set_sessions(self.session_manager.list_sessions(), active_id)
+        if active_id:
+            self._load_session_into_view(active_id)
+        else:
+            self.messages = []
+            self._update_chat_view()
+
+    def _on_session_selected(self, session_id: str) -> None:
+        current_id = self.session_manager.get_active_session_id()
+        if session_id == current_id:
+            return
+        if self._sending:
+            QMessageBox.information(self, "セッション", "送信中はセッションを切り替えられません。")
+            if self.session_panel and current_id:
+                self.session_panel.set_active_session(current_id)
+            return
+        self._persist_active_session()
+        self._load_session_into_view(session_id)
 
     def _refresh_profile_combo(self) -> None:
         if not self._profile_combo:
@@ -396,6 +512,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.input_field.clear()
+        self._persist_active_session()
 
     def _on_stop_clicked(self):
         """停止ボタン押下でストリームを中断する。"""
@@ -424,6 +541,7 @@ class MainWindow(QMainWindow):
         if self.config.ui_autoscroll_enabled:
             self._scroll_to_end()
         self.input_field.clear()
+        self._persist_active_session()
 
     def _on_worker_failed(self, user_message: str, detail: str, elapsed_ms: int):
         try:
@@ -438,6 +556,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         QMessageBox.critical(self, "通信エラー", user_message)
+        self._persist_active_session()
 
     # キーバインド（Enter 改行 / Ctrl+Enter 送信）
     def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt 既定名
@@ -458,67 +577,6 @@ class MainWindow(QMainWindow):
                 return True
         return super().eventFilter(obj, event)
 
-    # ---- v0.4: 履歴のロード/セーブ/エクスポート ----
-    def _history_path(self) -> str:
-        """履歴の保存先パス（文字列）を取得する。"""
-        cfg_path = getattr(self.config, "history_path", None)
-        if cfg_path:
-            return cfg_path  # type: ignore[return-value]
-        base = get_default_history_path()
-        fmt = getattr(self.config, "history_format", "json")
-        if fmt == "markdown":
-            base = base.with_suffix(".md")
-        return str(base)
-
-    def _load_session_if_available(self) -> None:
-        """起動時にセッションを自動ロードする（有効時）。"""
-        if not getattr(self.config, "history_enabled", True):
-            return
-        from pathlib import Path as _P
-        p = _P(self._history_path())
-        if not p.exists():
-            return
-        # 非ブロッキングでロード
-        self._io_thread = QThread(self)
-        worker = LoadSessionWorker(p)
-        self._io_worker = worker
-        worker.moveToThread(self._io_thread)
-        self._io_thread.started.connect(worker.run)
-        worker.succeeded.connect(self._on_load_succeeded)
-        worker.failed.connect(self._on_load_failed)
-        worker.succeeded.connect(self._cleanup_io_worker)
-        worker.failed.connect(self._cleanup_io_worker)
-        self._io_thread.start()
-
-    def _cleanup_io_worker(self, *args):
-        try:
-            if self._io_thread and self._io_thread.isRunning():
-                self._io_thread.quit()
-                self._io_thread.wait(2000)
-        finally:
-            self._io_thread = None
-            self._io_worker = None
-
-    def _on_load_succeeded(self, loaded_messages: list):
-        try:
-            if loaded_messages:
-                # list[dict] の場合にも対応（安全側）
-                msgs: list[Message] = []
-                for item in loaded_messages:
-                    if isinstance(item, Message):
-                        msgs.append(item)
-                    elif isinstance(item, dict):
-                        msgs.append(Message.from_dict(item))
-                if msgs:
-                    self.messages = msgs
-                    self._update_chat_view()
-                    self.statusBar().showMessage("前回の会話を読み込みました", 3000)
-        except Exception:
-            QMessageBox.information(self, "履歴の読み込み", "前回の会話を読み込めませんでした。新規セッションで開始します。")
-
-    def _on_load_failed(self, detail: str):
-        QMessageBox.information(self, "履歴の読み込み", "前回の会話を読み込めませんでした。新規セッションで開始します。")
-
     def _check_history_limits(self) -> None:
         """履歴のソフト上限を超えた場合に非ブロッキングで通知する。"""
         max_msgs = int(getattr(self.config, "history_max_messages", 400) or 400)
@@ -527,18 +585,29 @@ class MainWindow(QMainWindow):
         if num_msgs > max_msgs or total_chars > max_chars:
             self.statusBar().showMessage("履歴が大きくなっています。保存/エクスポート前に見直しを検討してください。", 5000)
 
+    def _persist_active_session(self) -> None:
+        if not getattr(self.config, "history_enabled", True):
+            return
+        active_id = self.session_manager.get_active_session_id()
+        if not active_id:
+            return
+        try:
+            self.session_manager.save_session_messages(active_id, self.messages)
+        except Exception:
+            QMessageBox.warning(self, "セッション", "セッションの保存に失敗しました。")
+
+    def _legacy_history_path(self) -> Path:
+        cfg_path = getattr(self.config, "history_path", None)
+        if cfg_path:
+            return Path(cfg_path)
+        return get_default_history_path()
+
     def closeEvent(self, event):  # noqa: N802 - Qt 既定名
-        """ウィンドウクローズ時にセッションを保存する。"""
+        """ウィンドウクローズ時にアクティブセッションを保存する。"""
         try:
             if getattr(self.config, "history_enabled", True):
                 self._check_history_limits()
-                from pathlib import Path as _P
-                p = _P(self._history_path())
-                fmt = getattr(self.config, "history_format", "json")
-                if fmt == "markdown":
-                    storage.export_markdown_file(self.messages, p, metadata={"model": self.config.model})
-                else:
-                    storage.save_session_atomic(self.messages, p)
+                self._persist_active_session()
         except Exception:
             QMessageBox.warning(self, "保存エラー", "セッションの保存に失敗しました。")
         finally:
@@ -615,16 +684,50 @@ class MainWindow(QMainWindow):
 
 
 class SettingsDialog(QDialog):
-    """プロファイルを編集するダイアログ（追加/編集/削除）。"""
+    """アプリ全体の設定を編集するダイアログ。"""
     
     def __init__(self, parent=None, config: Optional[Config] = None):
         super().__init__(parent)
-        self.setWindowTitle("プロファイル設定")
-        self.resize(420, 260)
+        self.setWindowTitle("設定")
+        self.resize(640, 420)
         self._config = config or Config()
-        
-        layout = QFormLayout(self)
-        
+
+        main_layout = QVBoxLayout(self)
+        self._tabs = QTabWidget()
+        main_layout.addWidget(self._tabs)
+
+        # ---- タブ: 接続・プロファイル ----
+        self._init_profile_tab()
+
+        # ---- タブ: チャット・挙動 ----
+        self._init_behavior_tab()
+
+        # ---- タブ: 履歴・セッション ----
+        self._init_history_tab()
+
+        # ---- タブ: 表示・フォント ----
+        self._init_display_tab()
+
+        # ---- タブ: ネットワーク ----
+        self._init_network_tab()
+
+        # ボタン（共通フッター）
+        button_box = QDialogButtonBox()
+        self._btn_save = button_box.addButton("保存", QDialogButtonBox.AcceptRole)
+        self._btn_add = button_box.addButton("新規追加", QDialogButtonBox.ActionRole)
+        self._btn_delete = button_box.addButton("削除", QDialogButtonBox.DestructiveRole)
+        self._btn_cancel = button_box.addButton("キャンセル", QDialogButtonBox.RejectRole)
+        self._btn_save.clicked.connect(self._on_save)
+        self._btn_add.clicked.connect(self._on_add)
+        self._btn_delete.clicked.connect(self._on_delete)
+        self._btn_cancel.clicked.connect(self.reject)
+        main_layout.addWidget(button_box)
+
+    # ---- タブ初期化 ----
+    def _init_profile_tab(self) -> None:
+        tab = QWidget()
+        layout = QFormLayout(tab)
+
         # 設定項目（プロファイル名/タイプ）
         self.name_field = QLineEdit()
         current = get_current_profile(self._config)
@@ -647,7 +750,7 @@ class SettingsDialog(QDialog):
         else:
             self.base_url_field.setText(self._config.base_url)
         layout.addRow("ベース URL:", self.base_url_field)
-        
+
         self.model_field = QLineEdit()
         self.model_field.setPlaceholderText("gemma3:4b")
         if current:
@@ -655,7 +758,7 @@ class SettingsDialog(QDialog):
         else:
             self.model_field.setText(self._config.model)
         layout.addRow("モデル名:", self.model_field)
-        
+
         self.api_key_field = QLineEdit()
         self.api_key_field.setEchoMode(QLineEdit.Password)
         self.api_key_field.setPlaceholderText("（任意）")
@@ -665,37 +768,111 @@ class SettingsDialog(QDialog):
             self.api_key_field.setText(self._config.api_key)
         layout.addRow("API キー:", self.api_key_field)
 
-        # タイムアウト（秒）
-        self.timeout_field = QLineEdit()
-        if self._config:
-            self.timeout_field.setText(str(int(self._config.request_timeout_ms / 1000)))
-        else:
-            self.timeout_field.setText("30")
-        layout.addRow("リードタイムアウト（秒）:", self.timeout_field)
+        self._tabs.addTab(tab, "接続・プロファイル")
+
+    def _init_behavior_tab(self) -> None:
+        tab = QWidget()
+        layout = QFormLayout(tab)
 
         # 送信キーバインド
         self.ctrl_enter_checkbox = QCheckBox("Ctrl+Enter で送信")
         self.enter_to_send_checkbox = QCheckBox("Enter で送信")
-        if self._config:
-            self.ctrl_enter_checkbox.setChecked(bool(self._config.ui_ctrl_enter_to_send))
-            self.enter_to_send_checkbox.setChecked(bool(self._config.ui_enter_to_send))
-        else:
-            self.ctrl_enter_checkbox.setChecked(True)
-            self.enter_to_send_checkbox.setChecked(False)
+        self.ctrl_enter_checkbox.setChecked(bool(self._config.ui_ctrl_enter_to_send))
+        self.enter_to_send_checkbox.setChecked(bool(self._config.ui_enter_to_send))
         layout.addRow(self.ctrl_enter_checkbox)
         layout.addRow(self.enter_to_send_checkbox)
-        
-        # ボタン
-        button_box = QDialogButtonBox()
-        self._btn_save = button_box.addButton("保存", QDialogButtonBox.AcceptRole)
-        self._btn_add = button_box.addButton("新規追加", QDialogButtonBox.ActionRole)
-        self._btn_delete = button_box.addButton("削除", QDialogButtonBox.DestructiveRole)
-        self._btn_cancel = button_box.addButton("キャンセル", QDialogButtonBox.RejectRole)
-        self._btn_save.clicked.connect(self._on_save)
-        self._btn_add.clicked.connect(self._on_add)
-        self._btn_delete.clicked.connect(self._on_delete)
-        self._btn_cancel.clicked.connect(self.reject)
-        layout.addRow(button_box)
+
+        # チャット挙動
+        self.autoscroll_checkbox = QCheckBox("新しいメッセージで自動スクロール")
+        self.autoscroll_checkbox.setChecked(bool(self._config.ui_autoscroll_enabled))
+        layout.addRow(self.autoscroll_checkbox)
+
+        self.streaming_stop_checkbox = QCheckBox("ストリーミング中に「停止」ボタンを表示")
+        self.streaming_stop_checkbox.setChecked(bool(self._config.ui_streaming_stop_enabled))
+        layout.addRow(self.streaming_stop_checkbox)
+
+        self.streaming_chunk_interval_field = QSpinBox()
+        self.streaming_chunk_interval_field.setRange(0, 1000)
+        self.streaming_chunk_interval_field.setSingleStep(10)
+        self.streaming_chunk_interval_field.setValue(int(self._config.ui_streaming_chunk_render_interval_ms or 0))
+        layout.addRow("ストリーミング更新間隔 (ms):", self.streaming_chunk_interval_field)
+
+        self._tabs.addTab(tab, "チャット・挙動")
+
+    def _init_history_tab(self) -> None:
+        tab = QWidget()
+        layout = QFormLayout(tab)
+
+        # 履歴保存
+        self.history_enabled_checkbox = QCheckBox("会話履歴をローカルに保存する（マルチセッション）")
+        self.history_enabled_checkbox.setChecked(bool(self._config.history_enabled))
+        layout.addRow(self.history_enabled_checkbox)
+
+        self.history_format_combo = QComboBox()
+        self.history_format_combo.addItems(["json", "markdown"])
+        current_fmt = getattr(self._config, "history_format", "json")
+        idx = self.history_format_combo.findText(current_fmt)
+        if idx >= 0:
+            self.history_format_combo.setCurrentIndex(idx)
+        layout.addRow("履歴保存フォーマット:", self.history_format_combo)
+
+        self.history_max_messages_spin = QSpinBox()
+        self.history_max_messages_spin.setRange(50, 5000)
+        self.history_max_messages_spin.setSingleStep(50)
+        self.history_max_messages_spin.setValue(int(self._config.history_max_messages or 400))
+        layout.addRow("履歴メッセージ数の目安:", self.history_max_messages_spin)
+
+        self.history_max_chars_spin = QSpinBox()
+        self.history_max_chars_spin.setRange(10_000, 2_000_000)
+        self.history_max_chars_spin.setSingleStep(50_000)
+        self.history_max_chars_spin.setValue(int(self._config.history_max_chars or 200_000))
+        layout.addRow("履歴文字数の目安:", self.history_max_chars_spin)
+
+        self._tabs.addTab(tab, "履歴・セッション")
+
+    def _init_display_tab(self) -> None:
+        tab = QWidget()
+        layout = QFormLayout(tab)
+
+        self.font_family_field = QLineEdit()
+        self.font_family_field.setText(self._config.ui_markdown_font_family or "Segoe UI")
+        layout.addRow("Markdown フォントファミリ:", self.font_family_field)
+
+        self.font_size_spin = QSpinBox()
+        self.font_size_spin.setRange(8, 32)
+        self.font_size_spin.setValue(int(self._config.ui_markdown_font_size_pt or 11))
+        layout.addRow("Markdown フォントサイズ (pt):", self.font_size_spin)
+
+        self.line_height_spin = QDoubleSpinBox()
+        self.line_height_spin.setRange(1.0, 3.0)
+        self.line_height_spin.setSingleStep(0.1)
+        self.line_height_spin.setValue(float(self._config.ui_markdown_line_height or 1.6))
+        layout.addRow("行間:", self.line_height_spin)
+
+        self._tabs.addTab(tab, "表示・フォント")
+
+    def _init_network_tab(self) -> None:
+        tab = QWidget()
+        layout = QFormLayout(tab)
+
+        # タイムアウト（秒）
+        self.request_timeout_field = QLineEdit()
+        self.request_timeout_field.setText(str(int(self._config.request_timeout_ms / 1000)))
+        layout.addRow("リクエストタイムアウト（秒）:", self.request_timeout_field)
+
+        self.connect_timeout_field = QLineEdit()
+        self.connect_timeout_field.setText(str(int(self._config.connect_timeout_ms / 1000)))
+        layout.addRow("接続タイムアウト（秒）:", self.connect_timeout_field)
+
+        self.stream_total_timeout_field = QLineEdit()
+        self.stream_total_timeout_field.setText(str(int(self._config.stream_total_timeout_ms / 1000)))
+        layout.addRow("ストリーム全体タイムアウト（秒）:", self.stream_total_timeout_field)
+
+        self.stream_connect_timeout_field = QLineEdit()
+        self.stream_connect_timeout_field.setText(str(int(self._config.stream_connect_timeout_ms / 1000)))
+        layout.addRow("ストリーム接続タイムアウト（秒）:", self.stream_connect_timeout_field)
+
+        self._tabs.addTab(tab, "ネットワーク")
     
     def _on_save(self):
         """既存または新規の内容で保存する。"""
@@ -748,21 +925,42 @@ class SettingsDialog(QDialog):
     
     def get_config(self) -> Config:
         """ダイアログの入力から Config を生成する。"""
-        # タイムアウトとキーバインドはアプリ全体設定として反映
-        api_key = self.api_key_field.text().strip()
-        # タイムアウトは整数秒を ms に変換。無効入力は既定 30s を採用。
-        try:
-            read_timeout_s = max(1, int(self.timeout_field.text().strip()))
-        except ValueError:
-            read_timeout_s = 30
+        # 既存 profiles を使用（_finalize_config で更新済み）
+        cfg = self._config
+
+        # ネットワークタイムアウト（秒→ms）。無効入力は既定値を維持。
+        def _parse_int(text: str, default: int) -> int:
+            try:
+                return max(1, int(text.strip()))
+            except ValueError:
+                return default
+
+        cfg.request_timeout_ms = _parse_int(self.request_timeout_field.text(), int(cfg.request_timeout_ms / 1000)) * 1000
+        cfg.connect_timeout_ms = _parse_int(self.connect_timeout_field.text(), int(cfg.connect_timeout_ms / 1000)) * 1000
+        cfg.stream_total_timeout_ms = _parse_int(self.stream_total_timeout_field.text(), int(cfg.stream_total_timeout_ms / 1000)) * 1000
+        cfg.stream_connect_timeout_ms = _parse_int(self.stream_connect_timeout_field.text(), int(cfg.stream_connect_timeout_ms / 1000)) * 1000
+
         # キーバインドは片方のみ有効にする（両方ONの場合は Ctrl+Enter 優先）
         ctrl_enter = self.ctrl_enter_checkbox.isChecked()
         enter_send = self.enter_to_send_checkbox.isChecked() and not ctrl_enter
-        # 既存 profiles を使用（_finalize_config で更新済み）
-        cfg = self._config
-        cfg.request_timeout_ms = read_timeout_s * 1000
         cfg.ui_ctrl_enter_to_send = ctrl_enter
         cfg.ui_enter_to_send = enter_send
+
+        # チャット挙動
+        cfg.ui_autoscroll_enabled = self.autoscroll_checkbox.isChecked()
+        cfg.ui_streaming_stop_enabled = self.streaming_stop_checkbox.isChecked()
+        cfg.ui_streaming_chunk_render_interval_ms = int(self.streaming_chunk_interval_field.value())
+
+        # 表示・フォント
+        cfg.ui_markdown_font_family = self.font_family_field.text().strip() or "Segoe UI"
+        cfg.ui_markdown_font_size_pt = int(self.font_size_spin.value())
+        cfg.ui_markdown_line_height = float(self.line_height_spin.value())
+
+        # 履歴・セッション
+        cfg.history_enabled = self.history_enabled_checkbox.isChecked()
+        cfg.history_format = self.history_format_combo.currentText() or "json"
+        cfg.history_max_messages = int(self.history_max_messages_spin.value())
+        cfg.history_max_chars = int(self.history_max_chars_spin.value())
         return cfg
 
     # ---- helpers ----
@@ -806,7 +1004,7 @@ class LoggingSettingsDialog(QDialog):
     def __init__(self, parent=None, config: Optional[Config] = None):
         super().__init__(parent)
         self.setWindowTitle("ログ/診断設定")
-        self.resize(360, 160)
+        self.resize(380, 220)
         self._config = config or Config()
 
         layout = QFormLayout(self)
@@ -815,6 +1013,11 @@ class LoggingSettingsDialog(QDialog):
         self.logging_enabled_checkbox = QCheckBox("ログを有効化（推奨）")
         self.logging_enabled_checkbox.setChecked(bool(getattr(self._config, "logging_enabled", True)))
         layout.addRow(self.logging_enabled_checkbox)
+
+        # 会話履歴の保存有無（マルチセッションの永続化）
+        self.history_enabled_checkbox = QCheckBox("会話履歴をローカルに保存する（マルチセッション）")
+        self.history_enabled_checkbox.setChecked(bool(getattr(self._config, "history_enabled", True)))
+        layout.addRow(self.history_enabled_checkbox)
 
         # 詳細な環境情報の含有（診断用）
         self.env_details_checkbox = QCheckBox("診断情報に詳細な環境パスを含める")
@@ -828,6 +1031,7 @@ class LoggingSettingsDialog(QDialog):
 
     def _on_accept(self) -> None:
         self._config.logging_enabled = self.logging_enabled_checkbox.isChecked()
+        self._config.history_enabled = self.history_enabled_checkbox.isChecked()
         self._config.diagnostics_show_env_details = self.env_details_checkbox.isChecked()
         self.accept()
 
