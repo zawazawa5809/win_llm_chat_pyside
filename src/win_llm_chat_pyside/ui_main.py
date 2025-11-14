@@ -7,16 +7,17 @@ from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextBrowser, QPlainTextEdit, QPushButton, QMenuBar,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox, QFileDialog,
-    QMessageBox
+    QMessageBox, QComboBox, QLabel
 )
 from PySide6.QtCore import Qt, QObject, QEvent, QThread
 from PySide6.QtGui import QTextCursor
 
 from .models import Message
-from .config import Config, load_config, save_config, get_default_history_path
+from .config import Config, load_config, save_config, get_default_history_path, get_current_profile, Profile, validate_profile
 from .client import OpenAiCompatibleClient, LlmClientError
 from .workers import ChatWorker, StreamChatWorker, LoadSessionWorker
 from . import storage
+from .factory import create_llm_client
 
 
 class MainWindow(QMainWindow):
@@ -37,6 +38,7 @@ class MainWindow(QMainWindow):
         self._io_thread: Optional[QThread] = None
         self._io_worker: Optional[QObject] = None
         self._stop_button: Optional[QPushButton] = None
+        self._profile_combo: Optional[QComboBox] = None
         self._initialize_client()
         
         # UI構築
@@ -48,22 +50,30 @@ class MainWindow(QMainWindow):
         
     def _initialize_client(self):
         """設定から LLM クライアントを初期化する。"""
+        prof = get_current_profile(self.config)
+        # 後方互換：プロファイルが未設定のケースも validate で弾かない
         is_valid, error_msg = self.config.validate()
-        if is_valid:
-            # timeout は秒または (connect, read) 秒タプルで渡す
-            # ストリーミング個別設定がある場合はそれを優先
-            connect_ms = getattr(self.config, "stream_connect_timeout_ms", self.config.connect_timeout_ms)
-            total_ms = getattr(self.config, "stream_total_timeout_ms", self.config.request_timeout_ms)
-            connect_s = max(0.1, connect_ms / 1000.0)
-            read_s = max(0.1, total_ms / 1000.0)
-            self.llm_client = OpenAiCompatibleClient(
-                base_url=self.config.base_url,
-                model=self.config.model,
-                api_key=self.config.api_key,
-                timeout=(connect_s, read_s)
-            )
-        else:
+        if not is_valid:
             self.llm_client = None
+            return
+        if prof:
+            self.llm_client = create_llm_client(
+                prof,
+                connect_timeout_ms=getattr(self.config, "stream_connect_timeout_ms", self.config.connect_timeout_ms),
+                total_timeout_ms=getattr(self.config, "stream_total_timeout_ms", self.config.request_timeout_ms),
+            )  # type: ignore[assignment]
+            return
+        # 旧形式：Config の単一項目から OpenAI 互換クライアントを作成
+        connect_ms = getattr(self.config, "stream_connect_timeout_ms", self.config.connect_timeout_ms)
+        total_ms = getattr(self.config, "stream_total_timeout_ms", self.config.request_timeout_ms)
+        connect_s = max(0.1, connect_ms / 1000.0)
+        read_s = max(0.1, total_ms / 1000.0)
+        self.llm_client = OpenAiCompatibleClient(
+            base_url=self.config.base_url,
+            model=self.config.model,
+            api_key=self.config.api_key,
+            timeout=(connect_s, read_s)
+        )
         
     def _setup_ui(self):
         """UI コンポーネントを配置する。"""
@@ -71,6 +81,16 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         
         layout = QVBoxLayout(central_widget)
+
+        # プロファイル選択バー
+        top_bar = QHBoxLayout()
+        label = QLabel("プロファイル:")
+        self._profile_combo = QComboBox()
+        self._refresh_profile_combo()
+        self._profile_combo.currentTextChanged.connect(self._on_profile_selected)
+        top_bar.addWidget(label)
+        top_bar.addWidget(self._profile_combo, stretch=1)
+        layout.addLayout(top_bar)
         
         # チャット表示エリア（Markdown 対応）
         self.chat_view = QTextBrowser()
@@ -111,8 +131,39 @@ class MainWindow(QMainWindow):
 
         settings_menu = menubar.addMenu("設定")
         
-        settings_action = settings_menu.addAction("接続設定...")
+        settings_action = settings_menu.addAction("プロファイル設定...")
         settings_action.triggered.connect(self._open_settings_dialog)
+
+    def _refresh_profile_combo(self) -> None:
+        if not self._profile_combo:
+            return
+        self._profile_combo.blockSignals(True)
+        self._profile_combo.clear()
+        names = [p.name for p in (self.config.profiles or [])]
+        self._profile_combo.addItems(names)
+        current = self.config.current_profile_name or (names[0] if names else "")
+        if current:
+            idx = self._profile_combo.findText(current)
+            if idx >= 0:
+                self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.blockSignals(False)
+
+    def _on_profile_selected(self, name: str) -> None:
+        """ドロップダウンでプロファイルが選択されたときの処理。"""
+        if not name:
+            return
+        if name == self.config.current_profile_name:
+            return
+        # 送信中は切替禁止
+        if self._sending:
+            QMessageBox.information(self, "切替", "送信中はプロファイルを切り替えられません。")
+            self._refresh_profile_combo()
+            return
+        # 反映
+        self.config.current_profile_name = name
+        save_config(self.config)
+        self._initialize_client()
+        self.statusBar().showMessage(f"プロファイルを切り替えました: {name}", 3000)
         
     def _on_send_clicked(self):
         """送信ボタンがクリックされたときの処理。"""
@@ -208,17 +259,17 @@ class MainWindow(QMainWindow):
         )
         
     def _open_settings_dialog(self):
-        """設定ダイアログを開く。"""
+        """プロファイル設定ダイアログを開く。"""
         dialog = SettingsDialog(self, self.config)
         if dialog.exec() == QDialog.Accepted:
-            # 設定を保存
+            # 更新後の config を取得・保存
             self.config = dialog.get_config()
             save_config(self.config)
-            
-            # クライアントを再初期化
+            # ドロップダウン更新とクライアント再初期化
+            self._refresh_profile_combo()
             self._initialize_client()
             
-            QMessageBox.information(self, "設定", "設定が保存されました。")
+            QMessageBox.information(self, "設定", "プロファイル設定を保存しました。")
 
     def _set_busy(self, busy: bool):
         """送信中 UI ロックとインジケータ制御。"""
@@ -443,39 +494,60 @@ class MainWindow(QMainWindow):
 
 
 class SettingsDialog(QDialog):
-    """接続設定を編集するダイアログ。"""
+    """プロファイルを編集するダイアログ（追加/編集/削除）。"""
     
     def __init__(self, parent=None, config: Optional[Config] = None):
         super().__init__(parent)
-        self.setWindowTitle("接続設定")
-        self.resize(400, 200)
+        self.setWindowTitle("プロファイル設定")
+        self.resize(420, 260)
+        self._config = config or Config()
         
         layout = QFormLayout(self)
         
-        # 設定項目
+        # 設定項目（プロファイル名/タイプ）
+        self.name_field = QLineEdit()
+        current = get_current_profile(self._config)
+        self.name_field.setText(current.name if current else "default")
+        layout.addRow("プロファイル名:", self.name_field)
+
+        self.type_field = QComboBox()
+        self.type_field.addItems(["openai", "ollama"])
+        if current:
+            idx = self.type_field.findText(current.type)
+            if idx >= 0:
+                self.type_field.setCurrentIndex(idx)
+        layout.addRow("タイプ:", self.type_field)
+
+        # 接続項目
         self.base_url_field = QLineEdit()
         self.base_url_field.setPlaceholderText("http://localhost:11434")
-        if config:
-            self.base_url_field.setText(config.base_url)
+        if current:
+            self.base_url_field.setText(current.base_url)
+        else:
+            self.base_url_field.setText(self._config.base_url)
         layout.addRow("ベース URL:", self.base_url_field)
         
         self.model_field = QLineEdit()
         self.model_field.setPlaceholderText("gemma3:4b")
-        if config:
-            self.model_field.setText(config.model)
+        if current:
+            self.model_field.setText(current.model)
+        else:
+            self.model_field.setText(self._config.model)
         layout.addRow("モデル名:", self.model_field)
         
         self.api_key_field = QLineEdit()
         self.api_key_field.setEchoMode(QLineEdit.Password)
         self.api_key_field.setPlaceholderText("（任意）")
-        if config and config.api_key:
-            self.api_key_field.setText(config.api_key)
+        if current and current.api_key:
+            self.api_key_field.setText(current.api_key)
+        elif self._config.api_key:
+            self.api_key_field.setText(self._config.api_key)
         layout.addRow("API キー:", self.api_key_field)
 
         # タイムアウト（秒）
         self.timeout_field = QLineEdit()
-        if config:
-            self.timeout_field.setText(str(int(config.request_timeout_ms / 1000)))
+        if self._config:
+            self.timeout_field.setText(str(int(self._config.request_timeout_ms / 1000)))
         else:
             self.timeout_field.setText("30")
         layout.addRow("リードタイムアウト（秒）:", self.timeout_field)
@@ -483,9 +555,9 @@ class SettingsDialog(QDialog):
         # 送信キーバインド
         self.ctrl_enter_checkbox = QCheckBox("Ctrl+Enter で送信")
         self.enter_to_send_checkbox = QCheckBox("Enter で送信")
-        if config:
-            self.ctrl_enter_checkbox.setChecked(bool(config.ui_ctrl_enter_to_send))
-            self.enter_to_send_checkbox.setChecked(bool(config.ui_enter_to_send))
+        if self._config:
+            self.ctrl_enter_checkbox.setChecked(bool(self._config.ui_ctrl_enter_to_send))
+            self.enter_to_send_checkbox.setChecked(bool(self._config.ui_enter_to_send))
         else:
             self.ctrl_enter_checkbox.setChecked(True)
             self.enter_to_send_checkbox.setChecked(False)
@@ -493,24 +565,69 @@ class SettingsDialog(QDialog):
         layout.addRow(self.enter_to_send_checkbox)
         
         # ボタン
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self._on_accept)
-        button_box.rejected.connect(self.reject)
+        button_box = QDialogButtonBox()
+        self._btn_save = button_box.addButton("保存", QDialogButtonBox.AcceptRole)
+        self._btn_add = button_box.addButton("新規追加", QDialogButtonBox.ActionRole)
+        self._btn_delete = button_box.addButton("削除", QDialogButtonBox.DestructiveRole)
+        self._btn_cancel = button_box.addButton("キャンセル", QDialogButtonBox.RejectRole)
+        self._btn_save.clicked.connect(self._on_save)
+        self._btn_add.clicked.connect(self._on_add)
+        self._btn_delete.clicked.connect(self._on_delete)
+        self._btn_cancel.clicked.connect(self.reject)
         layout.addRow(button_box)
     
-    def _on_accept(self):
-        """OK ボタンが押されたときのバリデーション。"""
-        config = self.get_config()
-        is_valid, error_msg = config.validate()
-        
-        if not is_valid:
-            QMessageBox.warning(self, "入力エラー", error_msg)
+    def _on_save(self):
+        """既存または新規の内容で保存する。"""
+        profile = self._profile_from_fields()
+        ok, msg = validate_profile(profile)
+        if not ok:
+            QMessageBox.warning(self, "入力エラー", msg)
             return
-        
-        self.accept()
+        # 名前重複は上書き保存とみなす
+        replaced = False
+        for idx, p in enumerate(self._config.profiles):
+            if p.name == profile.name:
+                self._config.profiles[idx] = profile
+                replaced = True
+                break
+        if not replaced:
+            self._config.profiles.append(profile)
+        self._config.current_profile_name = profile.name
+        if self._finalize_config():
+            self.accept()
+
+    def _on_add(self):
+        """新規追加（名前が未使用であることを前提）。"""
+        profile = self._profile_from_fields()
+        ok, msg = validate_profile(profile)
+        if not ok:
+            QMessageBox.warning(self, "入力エラー", msg)
+            return
+        if any(p.name == profile.name for p in self._config.profiles):
+            QMessageBox.warning(self, "重複", "同名のプロファイルが既に存在します。別の名前を入力してください。")
+            return
+        self._config.profiles.append(profile)
+        self._config.current_profile_name = profile.name
+        if self._finalize_config():
+            self.accept()
+
+    def _on_delete(self):
+        """現在名に一致するプロファイルを削除する。"""
+        name = self.name_field.text().strip()
+        if not name:
+            return
+        if len(self._config.profiles) <= 1:
+            QMessageBox.information(self, "削除不可", "少なくとも1つのプロファイルが必要です。")
+            return
+        self._config.profiles = [p for p in self._config.profiles if p.name != name]
+        # current の再設定
+        self._config.current_profile_name = self._config.profiles[0].name
+        if self._finalize_config():
+            self.accept()
     
     def get_config(self) -> Config:
         """ダイアログの入力から Config を生成する。"""
+        # タイムアウトとキーバインドはアプリ全体設定として反映
         api_key = self.api_key_field.text().strip()
         # タイムアウトは整数秒を ms に変換。無効入力は既定 30s を採用。
         try:
@@ -520,13 +637,45 @@ class SettingsDialog(QDialog):
         # キーバインドは片方のみ有効にする（両方ONの場合は Ctrl+Enter 優先）
         ctrl_enter = self.ctrl_enter_checkbox.isChecked()
         enter_send = self.enter_to_send_checkbox.isChecked() and not ctrl_enter
-        return Config(
+        # 既存 profiles を使用（_finalize_config で更新済み）
+        cfg = self._config
+        cfg.request_timeout_ms = read_timeout_s * 1000
+        cfg.ui_ctrl_enter_to_send = ctrl_enter
+        cfg.ui_enter_to_send = enter_send
+        return cfg
+
+    # ---- helpers ----
+    def _profile_from_fields(self) -> Profile:
+        name = self.name_field.text().strip() or "default"
+        ptype = self.type_field.currentText() or "openai"
+        api_key = self.api_key_field.text().strip()
+        return Profile(
+            name=name,
+            type=ptype,  # type: ignore[arg-type]
             base_url=self.base_url_field.text().strip(),
             model=self.model_field.text().strip(),
             api_key=api_key if api_key else None,
-            request_timeout_ms=read_timeout_s * 1000,
-            ui_ctrl_enter_to_send=ctrl_enter,
-            ui_enter_to_send=enter_send
         )
+
+    def _finalize_config(self) -> bool:
+        """構成の最終バリデーション。重複名や必須項目を確認。"""
+        # 一意性
+        seen = set()
+        for p in self._config.profiles:
+            if p.name in seen:
+                QMessageBox.warning(self, "入力エラー", f"プロファイル名が重複しています: {p.name}")
+                return False
+            seen.add(p.name)
+            ok, msg = validate_profile(p)
+            if not ok:
+                QMessageBox.warning(self, "入力エラー", msg)
+                return False
+        if not self._config.current_profile_name:
+            if self._config.profiles:
+                self._config.current_profile_name = self._config.profiles[0].name
+            else:
+                QMessageBox.warning(self, "入力エラー", "少なくとも1つのプロファイルが必要です。")
+                return False
+        return True
 
 

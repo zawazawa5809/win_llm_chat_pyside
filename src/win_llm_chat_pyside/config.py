@@ -4,9 +4,21 @@
 
 import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Optional, Literal
+from typing import Optional, Literal, List, Tuple
+
+
+@dataclass
+class Profile:
+    """接続先プロファイル。"""
+    name: str
+    type: Literal["openai", "ollama"] = "openai"
+    base_url: str = "http://localhost:11434"
+    model: str = "gemma3:4b"
+    api_key: Optional[str] = None
+    # 将来拡張用に余地を残す
+    extras: dict | None = None
 
 
 @dataclass
@@ -15,6 +27,9 @@ class Config:
     base_url: str = "http://localhost:11434"
     model: str = "gemma3:4b"
     api_key: Optional[str] = None
+    # v0.5: 複数プロファイル対応
+    profiles: List[Profile] = field(default_factory=list)
+    current_profile_name: Optional[str] = None
 
     # UI/ネットワーク拡張（既定値で後方互換）
     request_timeout_ms: int = 30000
@@ -49,12 +64,17 @@ class Config:
         Returns:
             (is_valid, error_message) のタプル
         """
+        # プロファイルがある場合はカレントプロファイルを検証する
+        if self.profiles and self.current_profile_name:
+            prof = get_current_profile(self)
+            if not prof:
+                return False, "現在のプロファイルが見つかりません"
+            return validate_profile(prof)
+        # 後方互換：単一設定を検証
         if not self.base_url or not self.base_url.strip():
             return False, "ベース URL が空です"
-        
         if not self.base_url.startswith(("http://", "https://")):
             return False, "ベース URL は http:// または https:// で始まる必要があります"
-        
         if not self.model or not self.model.strip():
             return False, "モデル名が空です"
         
@@ -105,12 +125,21 @@ def load_config() -> Config:
     config_path = get_config_path()
     
     if not config_path.exists():
+        # 新規は既定の設定（後段で migrate して profiles[0]=default 化可能）
         return Config()
     
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        return Config(**data)
+        # v0.5: 移行は Repository に委譲
+        try:
+            from . import profile_repository as repo
+            cfg = repo.migrate_if_needed(data)  # type: ignore[assignment]
+        except Exception:
+            # フォールバック（Repository 未導入でも動作）
+            cfg = _config_from_dict(data)
+            _migrate_single_to_profiles_if_needed(cfg)
+        return cfg
     except (json.JSONDecodeError, TypeError) as e:
         print(f"設定ファイルの読み込みに失敗しました: {e}")
         return Config()
@@ -123,9 +152,110 @@ def save_config(config: Config) -> None:
     Args:
         config: 保存する Config インスタンス
     """
+    # Repository に委譲（原子的保存）
+    try:
+        from . import profile_repository as repo
+        repo.save_full_config(config)
+        return
+    except Exception:
+        pass
+    # フォールバック（Repository 未導入でも動作）
     config_path = get_config_path()
-    
-    with open(config_path, "w", encoding="utf-8") as f:
+    tmp_path = config_path.with_suffix(".json.tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(asdict(config), f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, config_path)
 
+
+# ---- v0.5: プロファイル関連ヘルパ ----
+def _config_from_dict(data: dict) -> Config:
+    """dict から Config を生成。profiles を明示復元。"""
+    profiles_data = data.get("profiles") or []
+    profiles: list[Profile] = []
+    for p in profiles_data:
+        try:
+            profiles.append(Profile(
+                name=p["name"],
+                type=p.get("type", "openai"),
+                base_url=p.get("base_url") or data.get("base_url", "http://localhost:11434"),
+                model=p.get("model") or data.get("model", "gemma3:4b"),
+                api_key=p.get("api_key"),
+                extras=p.get("extras"),
+            ))
+        except KeyError:
+            continue
+    cfg = Config(
+        base_url=data.get("base_url", "http://localhost:11434"),
+        model=data.get("model", "gemma3:4b"),
+        api_key=data.get("api_key"),
+        profiles=profiles,
+        current_profile_name=data.get("current_profile_name"),
+        request_timeout_ms=int(data.get("request_timeout_ms", 30000)),
+        connect_timeout_ms=int(data.get("connect_timeout_ms", 10000)),
+        stream_total_timeout_ms=int(data.get("stream_total_timeout_ms", 30000)),
+        stream_connect_timeout_ms=int(data.get("stream_connect_timeout_ms", 5000)),
+        ui_enter_to_send=bool(data.get("ui_enter_to_send", False)),
+        ui_ctrl_enter_to_send=bool(data.get("ui_ctrl_enter_to_send", True)),
+        ui_autoscroll_enabled=bool(data.get("ui_autoscroll_enabled", True)),
+        ui_wait_indicator_style=data.get("ui_wait_indicator_style", "spinner"),
+        ui_markdown_font_family=data.get("ui_markdown_font_family", "Segoe UI"),
+        ui_markdown_font_size_pt=int(data.get("ui_markdown_font_size_pt", 11)),
+        ui_markdown_line_height=float(data.get("ui_markdown_line_height", 1.6)),
+        ui_streaming_stop_enabled=bool(data.get("ui_streaming_stop_enabled", True)),
+        ui_streaming_chunk_render_interval_ms=int(data.get("ui_streaming_chunk_render_interval_ms", 0)),
+        history_enabled=bool(data.get("history_enabled", True)),
+        history_format=data.get("history_format", "json"),
+        history_path=data.get("history_path"),
+        history_max_messages=int(data.get("history_max_messages", 400)),
+        history_max_chars=int(data.get("history_max_chars", 200_000)),
+        export_default_dir=data.get("export_default_dir"),
+        export_filename_pattern=data.get("export_filename_pattern", "Chat-{yyyy-MM-dd HH-mm}.md"),
+    )
+    return cfg
+
+
+def _migrate_single_to_profiles_if_needed(config: Config) -> None:
+    """
+    旧スキーマ（単一 base_url/model）から profiles[0] への冪等移行。
+    既に profiles があれば何もしない。
+    """
+    if config.profiles:
+        # 既に移行済み
+        return
+    # base_url/model が設定されているなら、それを profiles[0] として取り込む
+    default_name = "default"
+    prof = Profile(
+        name=default_name,
+        type="openai",  # 後方互換として openai とみなす
+        base_url=config.base_url,
+        model=config.model,
+        api_key=config.api_key,
+    )
+    config.profiles = [prof]
+    config.current_profile_name = default_name
+
+
+def get_current_profile(config: Config) -> Optional[Profile]:
+    """現在選択中のプロファイルを返す。見つからなければ None。"""
+    if not config.profiles or not config.current_profile_name:
+        return None
+    for p in config.profiles:
+        if p.name == config.current_profile_name:
+            return p
+    return None
+
+
+def validate_profile(profile: Profile) -> Tuple[bool, Optional[str]]:
+    """プロファイルの検証。"""
+    if not profile.name or not profile.name.strip():
+        return False, "プロファイル名が空です"
+    if profile.type not in ("openai", "ollama"):
+        return False, "type は openai または ollama を指定してください"
+    if not profile.base_url or not profile.base_url.strip():
+        return False, "ベース URL が空です"
+    if not profile.base_url.startswith(("http://", "https://")):
+        return False, "ベース URL は http:// または https:// で始まる必要があります"
+    if not profile.model or not profile.model.strip():
+        return False, "モデル名が空です"
+    return True, None
 
