@@ -1,7 +1,7 @@
 from pathlib import Path
 import tempfile
 
-from src.win_llm_chat_pyside.models import Message, Session
+from src.win_llm_chat_pyside.models import AttachmentMetadata, Message, Session
 from src.win_llm_chat_pyside.session_repository import SessionRepository
 
 
@@ -42,5 +42,35 @@ def test_session_repository_delete_session():
             assert False, "File should be deleted"
         except FileNotFoundError:
             pass
+
+
+def test_session_repository_persists_attachments():
+    with tempfile.TemporaryDirectory() as td:
+        repo = SessionRepository(Path(td))
+        session = _sample_session("sess-attachments")
+        attachment = AttachmentMetadata(
+            id="att-1",
+            session_id=session.id,
+            filename="doc.pdf",
+            size_bytes=1024,
+            mime_type="application/pdf",
+            page_count=3,
+            text_length=500,
+            status="ready",
+            error_message=None,
+            length_warning=True,
+        )
+        session.attachments = [attachment]
+        session.attachment_texts = {attachment.id: "extracted text"}
+
+        repo.save_session(session)
+        loaded = repo.load_session(session.id)
+
+        assert loaded.attachments
+        loaded_attachment = loaded.attachments[0]
+        assert loaded_attachment.filename == "doc.pdf"
+        assert loaded_attachment.status == "ready"
+        assert loaded_attachment.length_warning is True
+        assert loaded.attachment_texts[attachment.id] == "extracted text"
 
 

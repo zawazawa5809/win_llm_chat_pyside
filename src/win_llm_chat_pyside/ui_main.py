@@ -2,19 +2,27 @@
 MainWindow と SettingsDialog を提供する GUI モジュール。
 """
 
-from typing import Optional
+from typing import Optional, List
 from pathlib import Path
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTextBrowser, QPlainTextEdit, QPushButton, QMenuBar,
     QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox, QFileDialog,
     QMessageBox, QComboBox, QLabel, QInputDialog, QTabWidget,
-    QSpinBox, QDoubleSpinBox
+    QSpinBox, QDoubleSpinBox, QTextEdit
 )
 from PySide6.QtCore import Qt, QObject, QEvent, QThread, QUrl
-from PySide6.QtGui import QTextCursor, QDesktopServices, QGuiApplication
+from PySide6.QtGui import (
+    QTextCursor,
+    QDesktopServices,
+    QGuiApplication,
+    QColor,
+    QTextCharFormat,
+    QShortcut,
+    QKeySequence,
+)
 
-from .models import Message
+from .models import AttachmentMetadata, Message, PromptTemplate, RoleProfile, Session
 from .config import (
     Config,
     load_config,
@@ -24,6 +32,7 @@ from .config import (
     Profile,
     validate_profile,
     get_sessions_dir,
+    get_prompt_assets_dir,
 )
 from .client import OpenAiCompatibleClient, LlmClientError
 from .workers import ChatWorker, StreamChatWorker
@@ -34,6 +43,24 @@ from .diagnostics import DiagnosticsInfoProvider
 from .session_repository import SessionRepository
 from .session_manager import SessionManager
 from .session_widgets import SessionListPanel
+from .attachment_widgets import AttachmentListWidget
+from .attachments import AttachmentManager, FileTextExtractor
+from .attachment_prompts import AttachmentPromptService, PromptRequest
+from .prompt_repository import TemplateRepository, RoleProfileRepository
+from .prompt_template_store import PromptTemplateStore
+from .prompt_template_dialog import PromptTemplateManagerDialog
+from .prompt_utils import merge_template_text
+from .role_profile_store import RoleProfileStore
+from .role_profile_dialog import RoleProfileManagerDialog
+from .session_dialogs import SessionCreateDialog, RoleProfileSelectorDialog
+from .global_hotkey import GlobalHotkeyManager
+from .window_controller import WindowController
+from .search_services import (
+    SessionSearchService,
+    AttachmentSearchService,
+    AttachmentSearchInput,
+)
+from .search_widgets import SessionSearchBar, AttachmentSearchPanel
 
 
 class MainWindow(QMainWindow):
@@ -60,7 +87,16 @@ class MainWindow(QMainWindow):
         self._worker: Optional[QObject] = None
         self._stop_button: Optional[QPushButton] = None
         self._profile_combo: Optional[QComboBox] = None
+        self._template_combo: Optional[QComboBox] = None
+        self._template_insert_button: Optional[QPushButton] = None
         self.session_panel: Optional[SessionListPanel] = None
+        assets_dir = get_prompt_assets_dir(self.config)
+        self.template_repository = TemplateRepository(assets_dir)
+        self.template_store = PromptTemplateStore(self.template_repository)
+        self._templates_cache: List[PromptTemplate] = self.template_store.list_templates()
+        self.role_profile_repository = RoleProfileRepository(assets_dir)
+        self.role_profile_store = RoleProfileStore(self.role_profile_repository)
+        self._role_profiles_cache: List[RoleProfile] = self.role_profile_store.list_profiles()
         sessions_dir = get_sessions_dir(self.config)
         self._legacy_history_file = self._legacy_history_path()
         self.session_repository = SessionRepository(sessions_dir)
@@ -69,13 +105,35 @@ class MainWindow(QMainWindow):
             legacy_path=self._legacy_history_file,
             persist=getattr(self.config, "history_enabled", True),
         )
+        self.attachment_manager = AttachmentManager(
+            session_manager=self.session_manager,
+            text_extractor=FileTextExtractor(),
+        )
+        self.attachment_prompt_service = AttachmentPromptService(
+            template_store=self.template_store,
+            role_profile_store=self.role_profile_store,
+        )
+        self.window_controller = WindowController(self)
+        self.hotkey_manager = GlobalHotkeyManager(logger=app_logger)
+        self.session_search_service = SessionSearchService()
+        self.attachment_search_service = AttachmentSearchService()
+        self.session_search_bar: SessionSearchBar | None = None
+        self.attachment_search_panel: AttachmentSearchPanel | None = None
+        self._session_search_keyword: str = ""
+        self._session_search_ranges: list[tuple[int, int]] = []
+        self._session_search_current_index: int = -1
+        self._session_search_expected_hits: int = 0
         self._initialize_client()
+        self.attachment_widget: AttachmentListWidget | None = None
         
         # UI構築
         self._setup_ui()
         self._setup_menu()
         self._apply_markdown_style()
         self._initialize_sessions()
+        self._apply_global_hotkey_settings()
+        self._apply_always_on_top()
+        self._setup_shortcuts()
         
     def _initialize_client(self):
         """設定から LLM クライアントを初期化する。"""
@@ -116,6 +174,7 @@ class MainWindow(QMainWindow):
         self.session_panel.rename_requested.connect(self._on_session_rename_requested)
         self.session_panel.delete_requested.connect(self._on_session_delete_requested)
         self.session_panel.session_selected.connect(self._on_session_selected)
+        self.session_panel.search_requested.connect(self._on_session_list_search_requested)
         root_layout.addWidget(self.session_panel, stretch=1)
 
         layout = QVBoxLayout()
@@ -130,11 +189,47 @@ class MainWindow(QMainWindow):
         top_bar.addWidget(label)
         top_bar.addWidget(self._profile_combo, stretch=1)
         layout.addLayout(top_bar)
+
+        self.session_search_bar = SessionSearchBar(self)
+        self.session_search_bar.setVisible(False)
+        self.session_search_bar.search_requested.connect(self._on_session_search_requested)
+        self.session_search_bar.next_requested.connect(self._on_session_search_next)
+        self.session_search_bar.previous_requested.connect(self._on_session_search_previous)
+        self.session_search_bar.closed.connect(self._clear_session_search)
+        layout.addWidget(self.session_search_bar)
         
         # チャット表示エリア（Markdown 対応）
         self.chat_view = QTextBrowser()
         self.chat_view.setMarkdown("# LLM Chat Client\n\nメッセージを入力して送信してください。")
         layout.addWidget(self.chat_view, stretch=3)
+
+        # 添付ファイル一覧
+        self.attachment_widget = AttachmentListWidget(self)
+        self.attachment_widget.attach_requested.connect(self._on_attachment_add)
+        self.attachment_widget.summarize_requested.connect(self._on_attachment_summarize)
+        self.attachment_widget.question_requested.connect(self._on_attachment_question)
+        self.attachment_widget.remove_requested.connect(self._on_attachment_remove)
+        layout.addWidget(self.attachment_widget, stretch=1)
+
+        self.attachment_search_panel = AttachmentSearchPanel(self)
+        self.attachment_search_panel.setVisible(False)
+        self.attachment_search_panel.search_requested.connect(self._on_attachment_search_requested)
+        self.attachment_search_panel.snippet_requested.connect(self._on_attachment_snippet_requested)
+        layout.addWidget(self.attachment_search_panel)
+
+        # テンプレート挿入バー
+        template_bar = QHBoxLayout()
+        template_label = QLabel("テンプレート:")
+        self._template_combo = QComboBox()
+        self._template_combo.setEditable(False)
+        self._template_combo.setPlaceholderText("テンプレートを選択...")
+        self._template_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+        self._template_insert_button = QPushButton("挿入")
+        self._template_insert_button.clicked.connect(self._on_template_insert_clicked)
+        template_bar.addWidget(template_label)
+        template_bar.addWidget(self._template_combo, stretch=1)
+        template_bar.addWidget(self._template_insert_button)
+        layout.addLayout(template_bar)
         
         # 入力エリア
         input_layout = QHBoxLayout()
@@ -160,6 +255,7 @@ class MainWindow(QMainWindow):
 
         # ステータスバー（簡易インジケータ）
         self.statusBar().showMessage("")
+        self._refresh_template_combo()
         
     def _setup_menu(self):
         """メニューバーを設定する。"""
@@ -175,6 +271,15 @@ class MainWindow(QMainWindow):
 
         logging_action = settings_menu.addAction("ログ/診断設定...")
         logging_action.triggered.connect(self._open_logging_settings_dialog)
+
+        template_action = settings_menu.addAction("プロンプトテンプレート...")
+        template_action.triggered.connect(self._open_template_manager)
+
+        role_profile_action = settings_menu.addAction("役割プロファイル...")
+        role_profile_action.triggered.connect(self._open_role_profile_manager)
+
+        change_role_profile_action = settings_menu.addAction("セッション役割プロファイルを変更...")
+        change_role_profile_action.triggered.connect(self._on_change_session_role_profile)
 
         help_menu = menubar.addMenu("ヘルプ")
         logs_action = help_menu.addAction("ログフォルダを開く")
@@ -205,15 +310,60 @@ class MainWindow(QMainWindow):
             return
         self.messages = [Message(role=m.role, content=m.content) for m in session.messages]
         self._update_chat_view()
+        self._update_attachment_view(session)
         if show_status:
             self.statusBar().showMessage(f"セッション「{session.name}」を開きました", 3000)
 
-    def _on_session_create_requested(self) -> None:
-        name, ok = QInputDialog.getText(self, "新規セッション", "セッション名（省略可）:")
-        if not ok:
+    def _apply_global_hotkey_settings(self, show_dialog: bool = False) -> None:
+        """Config に基づいてグローバルホットキー登録を更新する。"""
+        if not getattr(self, "hotkey_manager", None) or not hasattr(self, "window_controller"):
             return
-        name = name.strip()
-        session = self.session_manager.create_session(name or None)
+        enabled = bool(getattr(self.config, "global_hotkey_enabled", True))
+        combination = getattr(self.config, "global_hotkey_combination", "Ctrl+Alt+Space") or "Ctrl+Alt+Space"
+        success, error = self.hotkey_manager.apply_settings(
+            enabled,
+            combination,
+            self.window_controller.toggle_visibility,
+        )
+        if not success and enabled:
+            message = error or "グローバルホットキーの登録に失敗しました。別の組み合わせを試してください。"
+            self.statusBar().showMessage(message, 5000)
+            if show_dialog:
+                QMessageBox.warning(self, "グローバルホットキー", message)
+        elif success and enabled:
+            self.statusBar().showMessage(f"グローバルホットキー: {combination}", 3000)
+
+    def _apply_always_on_top(self, show_status: bool = False) -> None:
+        """Config に基づいて常時最前面フラグを適用する。"""
+        if not hasattr(self, "window_controller"):
+            return
+        enabled = bool(getattr(self.config, "always_on_top", False))
+        self.window_controller.set_always_on_top(enabled)
+        if show_status:
+            message = "常に最前面を有効にしました" if enabled else "常に最前面を無効にしました"
+            self.statusBar().showMessage(message, 3000)
+
+    def _setup_shortcuts(self) -> None:
+        """ショートカットキーを初期化する。"""
+        QShortcut(QKeySequence("Ctrl+F"), self, activated=self._show_session_search_bar)
+        QShortcut(QKeySequence("Ctrl+Shift+F"), self, activated=self._focus_session_list_search)
+
+    def _on_session_create_requested(self) -> None:
+        dialog = SessionCreateDialog(self._role_profiles_cache, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        name, profile_id = dialog.get_values()
+        prompt = self._get_profile_prompt(profile_id)
+        try:
+            session = self.session_manager.create_session(name or None, profile_id, prompt)
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "セッション",
+                "セッションの作成に失敗しました。",
+                exc,
+                "session.create_failed",
+            )
+            return
         metas = self.session_manager.list_sessions()
         if self.session_panel:
             self.session_panel.set_sessions(metas, session.id)
@@ -268,6 +418,14 @@ class MainWindow(QMainWindow):
         self._persist_active_session()
         self._load_session_into_view(session_id)
 
+    def _show_session_search_bar(self) -> None:
+        if self.session_search_bar:
+            self.session_search_bar.show_bar()
+
+    def _focus_session_list_search(self) -> None:
+        if self.session_panel:
+            self.session_panel.focus_search()
+
     def _refresh_profile_combo(self) -> None:
         if not self._profile_combo:
             return
@@ -281,6 +439,38 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self._profile_combo.setCurrentIndex(idx)
         self._profile_combo.blockSignals(False)
+        self._refresh_template_combo()
+
+    def _refresh_template_combo(self) -> None:
+        if not self._template_combo:
+            return
+        has_templates = bool(self._templates_cache)
+        self._template_combo.blockSignals(True)
+        self._template_combo.clear()
+        for template in self._templates_cache:
+            self._template_combo.addItem(template.title, template.id)
+        self._template_combo.blockSignals(False)
+        self._template_combo.setEnabled(has_templates)
+        if self._template_insert_button:
+            self._template_insert_button.setEnabled(has_templates)
+
+    def _on_template_insert_clicked(self) -> None:
+        if not self._template_combo or not self.input_field:
+            return
+        template_id = self._template_combo.currentData()
+        if not template_id:
+            QMessageBox.information(self, "テンプレート", "挿入するテンプレートを選択してください。")
+            return
+        template = next((tpl for tpl in self._templates_cache if tpl.id == template_id), None)
+        if not template:
+            QMessageBox.warning(self, "テンプレート", "選択したテンプレートが見つかりません。")
+            return
+        merged = merge_template_text(self.input_field.toPlainText(), template.body)
+        self.input_field.setPlainText(merged)
+        cursor = self.input_field.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        self.input_field.setTextCursor(cursor)
+        self.input_field.setFocus()
 
     def _on_profile_selected(self, name: str) -> None:
         """ドロップダウンでプロファイルが選択されたときの処理。"""
@@ -358,6 +548,7 @@ class MainWindow(QMainWindow):
                 markdown_parts.append(f"\n**Assistant:**\n\n{msg.content}\n")
         
         self.chat_view.setMarkdown("".join(markdown_parts))
+        self._reapply_session_search_highlight()
 
     def _scroll_to_end(self):
         """ビュー末尾へスクロールする。"""
@@ -365,6 +556,326 @@ class MainWindow(QMainWindow):
         cursor.movePosition(QTextCursor.End)
         self.chat_view.setTextCursor(cursor)
         self.chat_view.ensureCursorVisible()
+
+    def _update_attachment_view(self, session: Session) -> None:
+        if not self.attachment_widget:
+            return
+        self.attachment_widget.set_attachments(session.attachments)
+        if self.attachment_search_panel:
+            has_attachments = bool(session.attachments)
+            self.attachment_search_panel.setVisible(has_attachments)
+            self.attachment_search_panel.set_attachments_available(has_attachments)
+            if not has_attachments:
+                self.attachment_search_panel.update_results("", [])
+
+    # ---- search handling ----
+    def _on_session_search_requested(self, keyword: str) -> None:
+        normalized = self.session_search_service.normalize_keyword(keyword)
+        self._session_search_keyword = normalized
+        if not self.session_search_service.is_valid_keyword(normalized):
+            self._session_search_ranges = []
+            self._session_search_current_index = -1
+            self.chat_view.setExtraSelections([])
+            if self.session_search_bar:
+                self.session_search_bar.update_status(current=0, total=0)
+            if normalized:
+                self.statusBar().showMessage("検索キーワードは2文字以上で入力してください。", 4000)
+            return
+        hits = self.session_search_service.search_in_session(self.messages, normalized)
+        self._session_search_expected_hits = len(hits)
+        self._apply_session_search_highlight()
+        if hits:
+            self.statusBar().showMessage(f"セッション内検索: {len(hits)}件ヒット", 2000)
+        else:
+            self.statusBar().showMessage("セッション内検索: 一致なし", 2000)
+
+    def _on_session_search_next(self) -> None:
+        if not self._session_search_ranges:
+            return
+        self._session_search_current_index = (self._session_search_current_index + 1) % len(self._session_search_ranges)
+        self._focus_session_search_hit()
+
+    def _on_session_search_previous(self) -> None:
+        if not self._session_search_ranges:
+            return
+        self._session_search_current_index = (self._session_search_current_index - 1) % len(self._session_search_ranges)
+        self._focus_session_search_hit()
+
+    def _apply_session_search_highlight(self) -> None:
+        keyword = self._session_search_keyword
+        if not keyword:
+            self.chat_view.setExtraSelections([])
+            return
+        doc = self.chat_view.document()
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.Start)
+        highlight_format = QTextCharFormat()
+        highlight_format.setBackground(QColor("#fff59d"))
+        selections = []
+        ranges: list[tuple[int, int]] = []
+        while True:
+            cursor = doc.find(keyword, cursor)
+            if cursor.isNull():
+                break
+            selection = QTextEdit.ExtraSelection()
+            selection.cursor = cursor
+            selection.format = highlight_format
+            selections.append(selection)
+            ranges.append((cursor.selectionStart(), cursor.selectionEnd()))
+            cursor.setPosition(cursor.selectionEnd())
+        self.chat_view.setExtraSelections(selections)
+        self._session_search_ranges = ranges
+        if not ranges:
+            self._session_search_current_index = -1
+        elif self._session_search_current_index == -1 or self._session_search_current_index >= len(ranges):
+            self._session_search_current_index = 0
+            self._focus_session_search_hit()
+        if self.session_search_bar:
+            current = self._session_search_current_index + 1 if ranges else 0
+            self.session_search_bar.update_status(current=current, total=len(ranges))
+
+    def _focus_session_search_hit(self) -> None:
+        if not self._session_search_ranges:
+            return
+        start, end = self._session_search_ranges[self._session_search_current_index]
+        cursor = self.chat_view.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.KeepAnchor)
+        self.chat_view.setTextCursor(cursor)
+        self.chat_view.ensureCursorVisible()
+        if self.session_search_bar:
+            self.session_search_bar.update_status(
+                current=self._session_search_current_index + 1,
+                total=len(self._session_search_ranges),
+            )
+
+    def _reapply_session_search_highlight(self) -> None:
+        if self._session_search_keyword:
+            self._apply_session_search_highlight()
+
+    def _clear_session_search(self) -> None:
+        self._session_search_keyword = ""
+        self._session_search_ranges = []
+        self._session_search_current_index = -1
+        self.chat_view.setExtraSelections([])
+        if self.session_search_bar:
+            self.session_search_bar.update_status(current=0, total=0)
+
+    def _on_session_list_search_requested(self, keyword: str) -> None:
+        if not self.session_panel:
+            return
+        normalized = self.session_search_service.normalize_keyword(keyword)
+        if not normalized:
+            self.session_panel.apply_filter(None)
+            self.statusBar().showMessage("セッション検索をクリアしました。", 3000)
+            return
+        if not self.session_search_service.is_valid_keyword(normalized):
+            self.statusBar().showMessage("セッション検索は2文字以上で入力してください。", 4000)
+            return
+        summaries = self.session_manager.build_session_summaries()
+        matched_ids = self.session_search_service.search_in_summaries(summaries, normalized)
+        self.session_panel.apply_filter(set(matched_ids))
+        self.statusBar().showMessage(f"セッション検索: {len(matched_ids)}件ヒット", 3000)
+
+    def _on_attachment_search_requested(self, keyword: str) -> None:
+        if not self.attachment_search_panel:
+            return
+        normalized = self.attachment_search_service.normalize_keyword(keyword)
+        if not self.attachment_search_service.is_valid_keyword(normalized):
+            self.statusBar().showMessage("添付テキスト検索は2文字以上で入力してください。", 4000)
+            self.attachment_search_panel.update_results("", [])
+            return
+        session = self._get_active_session_for_attachment()
+        if not session:
+            return
+        inputs = self._collect_attachment_search_inputs(session)
+        if not inputs:
+            QMessageBox.information(self, "添付検索", "検索対象となる抽出済みテキストがありません。")
+            return
+        hits = self.attachment_search_service.search_in_attachments(inputs, normalized)
+        self.attachment_search_panel.update_results(normalized, hits)
+        self.statusBar().showMessage(f"添付検索: {len(hits)}件ヒット", 3000)
+
+    def _on_attachment_snippet_requested(self, attachment_id: str, snippet: str) -> None:
+        session = self._get_active_session_for_attachment()
+        if not session:
+            return
+        metadata = self._find_attachment(session, attachment_id)
+        if not metadata:
+            QMessageBox.warning(self, "添付検索", "選択した添付ファイルが見つかりませんでした。")
+            return
+        keyword = ""
+        if self.attachment_search_panel:
+            keyword = self.attachment_search_panel.current_keyword
+        snippet_text = snippet.strip()
+        payload_lines = [
+            "[添付テキスト検索抜粋]",
+            f"ファイル: {metadata.filename}",
+        ]
+        if keyword:
+            payload_lines.append(f"検索キーワード: {keyword}")
+        payload_lines.append("")
+        payload_lines.append(snippet_text)
+        payload = "\n".join(payload_lines).strip()
+        existing = self.input_field.toPlainText().strip()
+        if existing:
+            payload = f"{existing}\n\n{payload}"
+        self.input_field.setPlainText(payload)
+        self.input_field.moveCursor(QTextCursor.End)
+        self.statusBar().showMessage("抜粋を入力欄に挿入しました。必要に応じて送信してください。", 5000)
+
+    def _collect_attachment_search_inputs(self, session: Session) -> list[AttachmentSearchInput]:
+        inputs: list[AttachmentSearchInput] = []
+        for metadata in session.attachments:
+            text = session.attachment_texts.get(metadata.id)
+            if not text:
+                continue
+            inputs.append(
+                AttachmentSearchInput(
+                    attachment_id=metadata.id,
+                    filename=metadata.filename,
+                    text=text,
+                )
+            )
+        return inputs
+    
+    # ---- attachment handling ----
+    def _on_attachment_add(self) -> None:
+        session_id = self.session_manager.get_active_session_id()
+        if not session_id:
+            QMessageBox.information(self, "添付ファイル", "アクティブなセッションがありません。")
+            return
+        file_path, _ = QFileDialog.getOpenFileName(self, "ファイルを選択")
+        if not file_path:
+            return
+        try:
+            metadata = self.attachment_manager.add_attachment(session_id, Path(file_path))
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "添付ファイル",
+                "ファイルの添付に失敗しました。",
+                exc,
+                "attachment.add_failed",
+            )
+            return
+        self._load_session_into_view(session_id, show_status=False)
+        self.statusBar().showMessage(f"「{metadata.filename}」を添付しました", 3000)
+
+    def _on_attachment_remove(self, attachment_id: str) -> None:
+        session_id = self.session_manager.get_active_session_id()
+        if not session_id:
+            QMessageBox.information(self, "添付ファイル", "アクティブなセッションがありません。")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "添付ファイル削除",
+            "選択した添付ファイルを削除しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self.attachment_manager.remove_attachment(session_id, attachment_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "添付ファイル",
+                "添付ファイルの削除に失敗しました。",
+                exc,
+                "attachment.remove_failed",
+            )
+            return
+        self._load_session_into_view(session_id, show_status=False)
+        self.statusBar().showMessage("添付ファイルを削除しました", 3000)
+
+    def _on_attachment_summarize(self, attachment_id: str) -> None:
+        session = self._get_active_session_for_attachment()
+        if not session:
+            return
+        metadata = self._find_attachment(session, attachment_id)
+        if not metadata:
+            QMessageBox.warning(self, "添付ファイル", "選択した添付ファイルが見つかりません。")
+            return
+        if metadata.status != "ready":
+            QMessageBox.information(self, "添付ファイル", "テキスト抽出が完了していません。しばらく待ってから再度お試しください。")
+            return
+        text = session.attachment_texts.get(attachment_id, "")
+        if not text:
+            QMessageBox.warning(self, "添付ファイル", "抽出済みテキストが見つかりませんでした。もう一度添付してください。")
+            return
+        prompt_request = self.attachment_prompt_service.build_summary_request(session, metadata, text)
+        display_user_content = f"[ファイル要約] {metadata.filename}"
+        self._send_attachment_prompt(prompt_request, display_user_content)
+
+    def _on_attachment_question(self, attachment_id: str) -> None:
+        session = self._get_active_session_for_attachment()
+        if not session:
+            return
+        metadata = self._find_attachment(session, attachment_id)
+        if not metadata:
+            QMessageBox.warning(self, "添付ファイル", "選択した添付ファイルが見つかりません。")
+            return
+        if metadata.status != "ready":
+            QMessageBox.information(self, "添付ファイル", "テキスト抽出が完了していません。")
+            return
+        question, ok = QInputDialog.getText(self, "添付ファイルに質問", "質問内容:")
+        if not ok:
+            return
+        question = question.strip()
+        if not question:
+            QMessageBox.warning(self, "添付ファイル", "質問を入力してください。")
+            return
+        text = session.attachment_texts.get(attachment_id, "")
+        if not text:
+            QMessageBox.warning(self, "添付ファイル", "抽出済みテキストが見つかりませんでした。")
+            return
+        prompt_request = self.attachment_prompt_service.build_qa_request(
+            session,
+            metadata,
+            text,
+            question=question,
+        )
+        display_user_content = f"[ファイルへの質問] {metadata.filename}\n{question}"
+        self._send_attachment_prompt(prompt_request, display_user_content)
+
+    def _get_active_session_for_attachment(self) -> Session | None:
+        session_id = self.session_manager.get_active_session_id()
+        if not session_id:
+            QMessageBox.information(self, "添付ファイル", "アクティブなセッションがありません。")
+            return None
+        try:
+            return self.session_manager.load_session(session_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "添付ファイル",
+                "セッションの読み込みに失敗しました。",
+                exc,
+                "attachment.session_load_failed",
+            )
+            return None
+
+    def _find_attachment(self, session: Session, attachment_id: str) -> AttachmentMetadata | None:
+        for attachment in session.attachments:
+            if attachment.id == attachment_id:
+                return attachment
+        return None
+
+    def _send_attachment_prompt(self, prompt_request: PromptRequest, display_user_content: str) -> None:
+        if not self.llm_client:
+            QMessageBox.warning(self, "送信", "LLM クライアントが設定されていません。")
+            return
+        if self._sending:
+            QMessageBox.information(self, "送信", "送信中は操作できません。")
+            return
+        self._set_busy(True)
+        self.messages.append(Message(role="user", content=display_user_content))
+        self.messages.append(Message(role="assistant", content=""))
+        self._update_chat_view()
+        self._scroll_to_end()
+        llm_options = {
+            "temperature": prompt_request.temperature,
+            "top_p": prompt_request.top_p,
+        }
+        self._start_stream_worker(messages_override=prompt_request.messages, llm_options=llm_options)
 
     def _apply_markdown_style(self):
         """Markdown 表示の基本スタイルを適用する。"""
@@ -413,6 +924,8 @@ class MainWindow(QMainWindow):
             # ドロップダウン更新とクライアント再初期化
             self._refresh_profile_combo()
             self._initialize_client()
+            self._apply_global_hotkey_settings(show_dialog=True)
+            self._apply_always_on_top(show_status=True)
 
             QMessageBox.information(self, "設定", "プロファイル設定を保存しました。")
 
@@ -428,6 +941,81 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
             QMessageBox.information(self, "設定", "ログ/診断設定を保存しました。")
+
+    def _open_template_manager(self) -> None:
+        """プロンプトテンプレート管理ダイアログを開く。"""
+        dialog = PromptTemplateManagerDialog(self.template_store, self)
+        dialog.exec()
+        self._templates_cache = self.template_store.list_templates()
+        self._refresh_template_combo()
+
+    def _open_role_profile_manager(self) -> None:
+        """役割プロファイル管理ダイアログを開く。"""
+        dialog = RoleProfileManagerDialog(self.role_profile_store, self)
+        dialog.exec()
+        self._refresh_role_profiles_cache()
+        self.statusBar().showMessage("役割プロファイルを更新しました", 3000)
+
+    def _refresh_role_profiles_cache(self) -> None:
+        self._role_profiles_cache = self.role_profile_store.list_profiles()
+
+    def _get_profile_prompt(self, profile_id: Optional[str]) -> Optional[str]:
+        if not profile_id:
+            return None
+        profile = next((p for p in self._role_profiles_cache if p.id == profile_id), None)
+        return profile.system_prompt if profile else None
+
+    def _log_and_show_error(self, title: str, message: str, exc: Exception, event: str) -> None:
+        try:
+            app_logger.error(event, {"error": str(exc)})
+        except Exception:
+            pass
+        QMessageBox.critical(self, title, f"{message}\n{exc}")
+
+    def _on_change_session_role_profile(self) -> None:
+        active_id = self.session_manager.get_active_session_id()
+        if not active_id:
+            QMessageBox.information(self, "役割プロファイル", "アクティブなセッションがありません。")
+            return
+        try:
+            session = self.session_manager.load_session(active_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "役割プロファイル",
+                "セッションの読み込みに失敗しました。",
+                exc,
+                "session.load_for_role_profile_failed",
+            )
+            return
+        dialog = RoleProfileSelectorDialog(self._role_profiles_cache, session.role_profile_id, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        selected_id = dialog.get_selected_profile_id()
+        selected_prompt = self._get_profile_prompt(selected_id)
+        if selected_id == session.role_profile_id:
+            return
+        confirm = QMessageBox.question(
+            self,
+            "役割プロファイルの変更",
+            "役割プロファイルを変更すると、以降の応答の傾向が変化します。\n続行しますか？",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            self.session_manager.apply_role_profile(active_id, selected_id, selected_prompt)
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "役割プロファイル",
+                "役割プロファイルの更新に失敗しました。",
+                exc,
+                "session.apply_role_profile_failed",
+            )
+            return
+        if self.session_panel:
+            self.session_panel.set_sessions(self.session_manager.list_sessions(), active_id)
+        self._load_session_into_view(active_id)
+        self.statusBar().showMessage("役割プロファイルを更新しました", 3000)
 
     def _set_busy(self, busy: bool):
         """送信中 UI ロックとインジケータ制御。"""
@@ -474,11 +1062,15 @@ class MainWindow(QMainWindow):
             self.input_field.setFocus()
 
     # Streaming 用
-    def _start_stream_worker(self):
+    def _start_stream_worker(
+        self,
+        messages_override: Optional[list[Message]] = None,
+        llm_options: Optional[dict] = None,
+    ):
         """バックグラウンドでストリーミング送信を開始する。"""
-        messages_snapshot = list(self.messages)
+        messages_snapshot = list(messages_override) if messages_override is not None else list(self.messages)
         self._worker_thread = QThread(self)
-        worker = StreamChatWorker(self.llm_client, messages_snapshot)  # type: ignore[arg-type]
+        worker = StreamChatWorker(self.llm_client, messages_snapshot, llm_options=llm_options)  # type: ignore[arg-type]
         self._worker = worker
         worker.moveToThread(self._worker_thread)
 
@@ -613,6 +1205,11 @@ class MainWindow(QMainWindow):
         finally:
             try:
                 app_logger.info("app.exit", {"profile_name": self.config.current_profile_name or ""})
+            except Exception:
+                pass
+            try:
+                if getattr(self, "hotkey_manager", None):
+                    self.hotkey_manager.shutdown()
             except Exception:
                 pass
             super().closeEvent(event)
@@ -797,6 +1394,19 @@ class SettingsDialog(QDialog):
         self.streaming_chunk_interval_field.setValue(int(self._config.ui_streaming_chunk_render_interval_ms or 0))
         layout.addRow("ストリーミング更新間隔 (ms):", self.streaming_chunk_interval_field)
 
+        self.hotkey_enabled_checkbox = QCheckBox("グローバルホットキーでウィンドウを呼び出す")
+        self.hotkey_enabled_checkbox.setChecked(bool(getattr(self._config, "global_hotkey_enabled", True)))
+        layout.addRow(self.hotkey_enabled_checkbox)
+
+        self.hotkey_combination_field = QLineEdit()
+        self.hotkey_combination_field.setPlaceholderText("Ctrl+Alt+Space")
+        self.hotkey_combination_field.setText(getattr(self._config, "global_hotkey_combination", "Ctrl+Alt+Space"))
+        layout.addRow("ホットキー（例: Ctrl+Alt+Space）:", self.hotkey_combination_field)
+
+        self.always_on_top_checkbox = QCheckBox("常に最前面に表示する")
+        self.always_on_top_checkbox.setChecked(bool(getattr(self._config, "always_on_top", False)))
+        layout.addRow(self.always_on_top_checkbox)
+
         self._tabs.addTab(tab, "チャット・挙動")
 
     def _init_history_tab(self) -> None:
@@ -950,6 +1560,10 @@ class SettingsDialog(QDialog):
         cfg.ui_autoscroll_enabled = self.autoscroll_checkbox.isChecked()
         cfg.ui_streaming_stop_enabled = self.streaming_stop_checkbox.isChecked()
         cfg.ui_streaming_chunk_render_interval_ms = int(self.streaming_chunk_interval_field.value())
+        cfg.global_hotkey_enabled = self.hotkey_enabled_checkbox.isChecked()
+        hotkey_text = self.hotkey_combination_field.text().strip() or "Ctrl+Alt+Space"
+        cfg.global_hotkey_combination = hotkey_text
+        cfg.always_on_top = self.always_on_top_checkbox.isChecked()
 
         # 表示・フォント
         cfg.ui_markdown_font_family = self.font_family_field.text().strip() or "Segoe UI"

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from time import perf_counter
-from typing import List
+from typing import List, Optional
 from pathlib import Path
 
 from PySide6.QtCore import QObject, Signal, Slot
@@ -25,17 +25,18 @@ class ChatWorker(QObject):
     succeeded = Signal(str, int)  # content, elapsed_ms
     failed = Signal(str, str, int)  # user_message, detail, elapsed_ms
 
-    def __init__(self, client, messages: List[Message]):
+    def __init__(self, client, messages: List[Message], llm_options: Optional[dict] = None):
         super().__init__()
         self._client = client
         self._messages = messages
+        self._llm_options = llm_options or {}
 
     @Slot()
     def run(self) -> None:
         """送信処理を実行する。"""
         start = perf_counter()
         try:
-            content = self._client.send_chat(self._messages)
+            content = self._client.send_chat(self._messages, options=self._llm_options)
             elapsed_ms = int((perf_counter() - start) * 1000)
             self.succeeded.emit(content, elapsed_ms)
         except Exception as e:  # noqa: BLE001 - 型でメッセージ分岐したい
@@ -79,11 +80,12 @@ class StreamChatWorker(QObject):
     stream_finished = Signal(int)  # elapsed_ms
     failed = Signal(str, str, int)  # user_message, detail, elapsed_ms
 
-    def __init__(self, client, messages: List[Message]):
+    def __init__(self, client, messages: List[Message], llm_options: Optional[dict] = None):
         super().__init__()
         self._client = client
         self._messages = messages
         self._cancelled = False
+        self._llm_options = llm_options or {}
 
     def cancel(self) -> None:
         """ストリーム処理の中断要求をセットする。"""
@@ -98,7 +100,7 @@ class StreamChatWorker(QObject):
         start = perf_counter()
         try:
             # iter_chat は非対応時に一括応答へフォールバックする実装
-            for delta in self._client.iter_chat(self._messages):
+            for delta in self._client.iter_chat(self._messages, options=self._llm_options):
                 if self._cancelled:
                     break
                 if delta:

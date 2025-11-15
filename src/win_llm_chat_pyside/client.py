@@ -34,7 +34,7 @@ class ResponseFormatError(LlmClientError):
 class BaseLlmClient(Protocol):
     """LLM クライアントのインターフェース。"""
     
-    def send_chat(self, messages: list[Message]) -> str:
+    def send_chat(self, messages: list[Message], *, options: Optional[dict] = None) -> str:
         """
         メッセージリストを送信し、アシスタントの応答を取得する。
         
@@ -51,7 +51,7 @@ class BaseLlmClient(Protocol):
         """
         ...
 
-    def iter_chat(self, messages: list[Message]) -> Iterator[str]:
+    def iter_chat(self, messages: list[Message], *, options: Optional[dict] = None) -> Iterator[str]:
         """
         メッセージリストを送信し、アシスタントの応答増分を逐次取得する。
         ストリーム非対応の場合は send_chat の全文を1回だけ yield する。
@@ -87,7 +87,7 @@ class OpenAiCompatibleClient:
         self.api_key = api_key
         self.timeout = timeout
         
-    def send_chat(self, messages: list[Message]) -> str:
+    def send_chat(self, messages: list[Message], *, options: Optional[dict] = None) -> str:
         """
         メッセージを送信し、応答を取得する。
         
@@ -114,6 +114,8 @@ class OpenAiCompatibleClient:
             "model": self.model,
             "messages": [msg.to_dict() for msg in messages]
         }
+        if options:
+            payload.update(self._sanitize_options(options))
         
         try:
             response = requests.post(
@@ -160,7 +162,7 @@ class OpenAiCompatibleClient:
         except RequestException as e:
             raise NetworkError(f"リクエスト中にエラーが発生しました: {e}")
 
-    def iter_chat(self, messages: list[Message]) -> Iterator[str]:
+    def iter_chat(self, messages: list[Message], *, options: Optional[dict] = None) -> Iterator[str]:
         """
         OpenAI 互換 API のストリーミング（SSE 風）を処理し、テキスト増分を返す。
         非対応やエラー時は send_chat にフォールバックし、その結果を一括で返す。
@@ -175,6 +177,8 @@ class OpenAiCompatibleClient:
             "messages": [msg.to_dict() for msg in messages],
             "stream": True,
         }
+        if options:
+            payload.update(self._sanitize_options(options))
 
         try:
             response = requests.post(
@@ -219,12 +223,21 @@ class OpenAiCompatibleClient:
         except (Timeout, RequestsConnectionError, RequestException):
             # フォールバックで一括レスポンス
             try:
-                full = self.send_chat(messages)
+                full = self.send_chat(messages, options=options)
                 if full:
                     yield full
             except Exception:
                 # ここでの例外は上位でハンドリングされる想定
                 raise
+
+    @staticmethod
+    def _sanitize_options(options: dict) -> dict:
+        allowed_keys = {"temperature", "top_p", "frequency_penalty", "presence_penalty", "max_tokens"}
+        sanitized: dict = {}
+        for key in allowed_keys:
+            if key in options and options[key] is not None:
+                sanitized[key] = options[key]
+        return sanitized
 
 
 class OllamaClient:
@@ -246,7 +259,7 @@ class OllamaClient:
         self.model = model
         self.timeout = timeout
         
-    def send_chat(self, messages: list[Message]) -> str:
+    def send_chat(self, messages: list[Message], *, options: Optional[dict] = None) -> str:
         """
         メッセージを送信し、応答を取得する。
         
@@ -267,6 +280,8 @@ class OllamaClient:
             "messages": [msg.to_dict() for msg in messages],
             "stream": False
         }
+        if options:
+            payload.update(self._sanitize_options(options))
         
         try:
             response = requests.post(
@@ -304,7 +319,7 @@ class OllamaClient:
         except RequestException as e:
             raise NetworkError(f"リクエスト中にエラーが発生しました: {e}")
 
-    def iter_chat(self, messages: list[Message]) -> Iterator[str]:
+    def iter_chat(self, messages: list[Message], *, options: Optional[dict] = None) -> Iterator[str]:
         """
         Ollama の JSON Lines ストリームを処理し、テキスト増分を返す。
         `done: true` を受け取ったら終了する。失敗時は send_chat にフォールバック。
@@ -315,6 +330,8 @@ class OllamaClient:
             "messages": [msg.to_dict() for msg in messages],
             "stream": True,
         }
+        if options:
+            payload.update(self._sanitize_options(options))
         try:
             response = requests.post(
                 endpoint,
@@ -347,10 +364,19 @@ class OllamaClient:
         except (Timeout, RequestsConnectionError, RequestException):
             # フォールバックで一括レスポンス
             try:
-                full = self.send_chat(messages)
+                full = self.send_chat(messages, options=options)
                 if full:
                     yield full
             except Exception:
                 raise
+
+    @staticmethod
+    def _sanitize_options(options: dict) -> dict:
+        allowed_keys = {"temperature", "top_p"}
+        sanitized: dict = {}
+        for key in allowed_keys:
+            if key in options and options[key] is not None:
+                sanitized[key] = options[key]
+        return sanitized
 
 

@@ -97,22 +97,38 @@ RAG／ベクタ DB／全社横断検索は v2.0 スコープ外とする。
 
 **テーマ:** 毎回同じ前置きプロンプトを書く無駄を削る。
 
+**ステータス:** ✅ **実装完了** (2025-11-14)
+
 ### 機能
 
 - プロンプトテンプレート
 
   - `title`, `body`（Markdown）を持つテンプレートを登録／編集／削除。
   - ボタン／ドロップダウンから選択して入力欄に挿入。
+  - 実装: `src/win_llm_chat_pyside/prompt_template_store.py`, `prompt_template_dialog.py` + UI 統合
 
 - 役割プロファイル（system prompt）
 
   - `name`, `system_prompt`（Markdown）を持つ。
   - セッション作成時にプロファイルを選択し、そのセッションの先頭 system メッセージとして適用。
   - 既存セッションでも役割プロファイルを変更可能（変更時は注意メッセージ）。
+  - 実装: `src/win_llm_chat_pyside/role_profile_store.py`, `role_profile_dialog.py` + UI 統合
 
 ### 永続化
 
 - テンプレート／役割プロファイルは JSON でローカル保存。
+  - 実装: `src/win_llm_chat_pyside/prompt_repository.py` で `TemplateRepository` / `RoleProfileRepository` 管理
+
+### エラーハンドリング・ログ
+
+- JSON 読み書き失敗時のログを `app_logger` で記録
+- UI エラーダイアログで失敗をユーザーに通知（`_log_and_show_error()`）
+- トップレベル未処理例外は `app.py` で キャッチ＆通知
+
+### テスト
+
+- pytest: 関連テスト 13+ 成功（test_prompt_repository.py, test_prompt_template_store.py, test_role_profile_store.py, test_session_manager.py など）
+- UI 手動検証: テンプレート・役割作成/編集/削除, セッション統合, 再起動後の復元確認済み
 
 ---
 

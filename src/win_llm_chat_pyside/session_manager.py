@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from . import storage
-from .models import Message, Session, SessionMeta
+from .models import Message, Session, SessionMeta, SessionSummary
 from .session_repository import SessionRepository
 
 
@@ -66,8 +66,19 @@ class SessionManager:
             self._session_cache[session_id] = session
         return session
 
-    def create_session(self, name: Optional[str] = None) -> Session:
-        session = self._create_session_object(self._generate_id(), name, [])
+    def create_session(
+        self,
+        name: Optional[str] = None,
+        role_profile_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+    ) -> Session:
+        session = self._create_session_object(
+            self._generate_id(),
+            name,
+            [],
+            role_profile_id=role_profile_id,
+            system_prompt=system_prompt,
+        )
         self._session_cache[session.id] = session
         self._metas.insert(0, session.to_meta())
         self._save_session(session)
@@ -107,6 +118,14 @@ class SessionManager:
         self._save_session(session)
         self._save_index()
 
+    def update_session(self, session: Session) -> None:
+        """セッション全体の更新を保存する。"""
+        session.updated_at = self._now()
+        self._session_cache[session.id] = session
+        self._update_meta(session)
+        self._save_session(session)
+        self._save_index()
+
     # ---- internal helpers ----
     def _bootstrap_sessions(self) -> List[SessionMeta]:
         migrated = self._try_migrate_from_legacy()
@@ -142,15 +161,22 @@ class SessionManager:
         session_id: str,
         name: Optional[str],
         messages: List[Message],
+        *,
+        role_profile_id: Optional[str] = None,
+        system_prompt: Optional[str] = None,
     ) -> Session:
         now = self._now()
         resolved_name = name.strip() if name else self._generate_default_name()
+        normalized_messages = [Message(role=m.role, content=m.content) for m in messages]
+        if system_prompt:
+            normalized_messages.insert(0, Message(role="system", content=system_prompt))
         return Session(
             id=session_id,
             name=resolved_name,
             created_at=now,
             updated_at=now,
-            messages=[Message(role=m.role, content=m.content) for m in messages],
+            messages=normalized_messages,
+            role_profile_id=role_profile_id,
         )
 
     def _generate_default_name(self) -> str:
@@ -192,6 +218,59 @@ class SessionManager:
     @staticmethod
     def _now() -> str:
         return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    # ---- role profile handling ----
+    def apply_role_profile(
+        self,
+        session_id: str,
+        role_profile_id: Optional[str],
+        system_prompt: Optional[str],
+    ) -> Session:
+        session = self._ensure_session_loaded(session_id)
+        session.role_profile_id = role_profile_id
+        if system_prompt:
+            session.messages.append(Message(role="system", content=system_prompt))
+        session.updated_at = self._now()
+        self._update_meta(session)
+        self._save_session(session)
+        self._save_index()
+        return session
+
+    # ---- summaries ----
+    def build_session_summaries(
+        self,
+        *,
+        max_messages: int = 5,
+        max_chars_per_message: int = 500,
+    ) -> List[SessionSummary]:
+        """セッション名＋冒頭メッセージのプレーンテキストを返す。"""
+        summaries: list[SessionSummary] = []
+        for meta in self._metas:
+            try:
+                session = self.load_session(meta.id)
+            except Exception:
+                continue
+            preview_parts: list[str] = []
+            for message in session.messages[: max(1, max_messages)]:
+                content = (message.content or "").strip()
+                if not content:
+                    continue
+                snippet = content.replace("\r\n", "\n").replace("\r", "\n")
+                snippet_lines = snippet.split("\n")
+                normalized = " ".join(part.strip() for part in snippet_lines if part.strip())
+                if not normalized:
+                    continue
+                preview_parts.append(normalized[: max(1, max_chars_per_message)])
+            preview_text = "\n".join(preview_parts)
+            summaries.append(
+                SessionSummary(
+                    id=meta.id,
+                    name=meta.name,
+                    updated_at=meta.updated_at,
+                    preview_text=preview_text,
+                )
+            )
+        return summaries
 
 
 

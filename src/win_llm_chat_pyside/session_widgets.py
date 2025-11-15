@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
     QMessageBox,
+    QLineEdit,
 )
 
 from .models import SessionMeta
@@ -25,22 +26,30 @@ class SessionListPanel(QWidget):
     create_requested = Signal()
     rename_requested = Signal(str)
     delete_requested = Signal(str)
+    search_requested = Signal(str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._list = QListWidget()
         self._list.currentItemChanged.connect(self._on_selection_changed)
-        self._metas: list[SessionMeta] = []
+        self._all_metas: list[SessionMeta] = []
+        self._filter_ids: set[str] | None = None
 
         self._create_button = QPushButton("新規")
         self._rename_button = QPushButton("名前変更")
         self._delete_button = QPushButton("削除")
+        self._search_input = QLineEdit()
+        self._search_input.setPlaceholderText("セッション検索 (Ctrl+Shift+F)")
+        self._search_input.setClearButtonEnabled(True)
+        self._search_input.returnPressed.connect(self._emit_search)
+        self._search_input.textChanged.connect(self._on_search_text_changed)
 
         self._create_button.clicked.connect(self.create_requested)
         self._rename_button.clicked.connect(self._emit_rename)
         self._delete_button.clicked.connect(self._emit_delete)
 
         layout = QVBoxLayout(self)
+        layout.addWidget(self._search_input)
         layout.addWidget(self._list, stretch=1)
 
         button_row = QHBoxLayout()
@@ -52,19 +61,24 @@ class SessionListPanel(QWidget):
         self.setMinimumWidth(220)
 
     def set_sessions(self, metas: list[SessionMeta], active_id: str | None) -> None:
-        self._metas = list(metas)
+        self._all_metas = list(metas)
+        self._render_sessions(active_id)
+
+    def _render_sessions(self, active_id: str | None) -> None:
         self._list.blockSignals(True)
         self._list.clear()
+        metas = self._metas_for_display()
         for meta in metas:
             item = QListWidgetItem(meta.name)
             item.setData(Qt.UserRole, meta.id)
             item.setToolTip(meta.name)
             self._list.addItem(item)
         self._list.blockSignals(False)
-        if active_id:
-            self.set_active_session(active_id)
-        elif metas:
-            self.set_active_session(metas[0].id)
+        target_id = active_id
+        if not target_id and metas:
+            target_id = metas[0].id
+        if target_id:
+            self.set_active_session(target_id)
 
     def set_active_session(self, session_id: str) -> None:
         self._list.blockSignals(True)
@@ -101,6 +115,28 @@ class SessionListPanel(QWidget):
         session_id = current.data(Qt.UserRole)
         if session_id:
             self.session_selected.emit(session_id)
+
+    def focus_search(self) -> None:
+        self._search_input.setFocus()
+        self._search_input.selectAll()
+
+    def apply_filter(self, session_ids: set[str] | None) -> None:
+        self._filter_ids = session_ids
+        active_id = self.current_session_id()
+        self._render_sessions(active_id)
+
+    def _metas_for_display(self) -> list[SessionMeta]:
+        if not self._filter_ids:
+            return list(self._all_metas)
+        return [meta for meta in self._all_metas if meta.id in self._filter_ids]
+
+    def _emit_search(self) -> None:
+        self.search_requested.emit(self._search_input.text())
+
+    def _on_search_text_changed(self, text: str) -> None:
+        if text.strip():
+            return
+        self.search_requested.emit("")
 
 
 

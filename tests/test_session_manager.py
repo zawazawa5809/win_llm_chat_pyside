@@ -51,3 +51,31 @@ def test_session_manager_migrates_from_legacy_json():
         assert session.messages[0].content == "legacy"
 
 
+def test_create_session_with_role_profile_adds_system_message():
+    with tempfile.TemporaryDirectory() as td:
+        manager = _create_manager(Path(td))
+        manager.initialize()
+
+        session = manager.create_session(
+            "案件B",
+            role_profile_id="role-1",
+            system_prompt="You are kind.",
+        )
+
+        assert session.role_profile_id == "role-1"
+        assert session.messages
+        assert session.messages[0].role == "system"
+        assert session.messages[0].content == "You are kind."
+
+
+def test_apply_role_profile_appends_message():
+    with tempfile.TemporaryDirectory() as td:
+        manager = _create_manager(Path(td))
+        manager.initialize()
+        session = manager.create_session("案件C")
+
+        updated = manager.apply_role_profile(session.id, "role-2", "Follow security policy.")
+
+        assert updated.role_profile_id == "role-2"
+        assert updated.messages[-1].content == "Follow security policy."
+

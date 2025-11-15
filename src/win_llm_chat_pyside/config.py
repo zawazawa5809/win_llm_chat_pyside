@@ -48,6 +48,11 @@ class Config:
     ui_streaming_stop_enabled: bool = True
     ui_streaming_chunk_render_interval_ms: int = 0
 
+    # ウィンドウ操作
+    global_hotkey_enabled: bool = True
+    global_hotkey_combination: str = "Ctrl+Alt+Space"
+    always_on_top: bool = False
+
     # 履歴保存/エクスポート（v0.4）
     history_enabled: bool = True
     history_format: Literal["json", "markdown"] = "json"
@@ -134,6 +139,22 @@ def get_sessions_dir(config: Optional[Config] = None) -> Path:
         base = get_data_dir() / "sessions"
     base.mkdir(parents=True, exist_ok=True)
     return base
+
+
+def get_prompt_assets_dir(config: Optional[Config] = None) -> Path:
+    """
+    プロンプトテンプレート/役割プロファイルの保存ディレクトリ。
+    履歴パスに依存させず、データディレクトリ配下に prompt_assets/ を切る。
+    """
+    base = get_data_dir()
+    if config and config.history_path:
+        try:
+            base = Path(config.history_path).expanduser().resolve().parent
+        except Exception:
+            pass
+    assets_dir = base / "prompt_assets"
+    assets_dir.mkdir(parents=True, exist_ok=True)
+    return assets_dir
 
 
 def get_default_logs_dir() -> Path:
@@ -234,6 +255,9 @@ def _config_from_dict(data: dict) -> Config:
         ui_markdown_line_height=float(data.get("ui_markdown_line_height", 1.6)),
         ui_streaming_stop_enabled=bool(data.get("ui_streaming_stop_enabled", True)),
         ui_streaming_chunk_render_interval_ms=int(data.get("ui_streaming_chunk_render_interval_ms", 0)),
+        global_hotkey_enabled=bool(data.get("global_hotkey_enabled", True)),
+        global_hotkey_combination=data.get("global_hotkey_combination", "Ctrl+Alt+Space") or "Ctrl+Alt+Space",
+        always_on_top=bool(data.get("always_on_top", False)),
         history_enabled=bool(data.get("history_enabled", True)),
         history_format=data.get("history_format", "json"),
         history_path=data.get("history_path"),
