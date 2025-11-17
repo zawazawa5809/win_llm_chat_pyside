@@ -12,12 +12,6 @@ dependencies = [
 [project.scripts]
 llm-chat-client = "win_llm_chat_pyside.app:main"
 
-[project.optional-dependencies]
-dev = [
-    "pytest>=7.4.0",
-    "pytest-mock>=3.12.0",
-]
-
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
@@ -29,5 +23,40 @@ packages = ["src/win_llm_chat_pyside"]
 dev = [
     "pytest>=7.4.0",
     "pytest-mock>=3.12.0",
+    "ruff>=0.6.0",
+    "mypy>=1.13.0",
+    "types-requests>=2.32.0.20241016",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"
+line-ending = "lf"
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+pretty = true
+show_column_numbers = true
+show_error_codes = true
+namespace_packages = true
+exclude = [
+    "build",
+    ".venv",
+    "src/win_llm_chat_pyside/ui_main.py",
+    "src/win_llm_chat_pyside/window_controller.py",
+    "src/win_llm_chat_pyside/.*widgets.py",
+    "src/win_llm_chat_pyside/.*dialogs.py",
+    "src/win_llm_chat_pyside/role_profile_dialog.py",
+    "src/win_llm_chat_pyside/prompt_template_dialog.py",
 ]
 
