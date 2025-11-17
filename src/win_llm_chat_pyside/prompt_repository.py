@@ -12,6 +12,10 @@ from typing import Iterable, List
 from .app_logger import app_logger
 from .models import PromptTemplate, RoleProfile
 
+# 現在のフォーマットバージョン
+TEMPLATE_FORMAT_VERSION = "1.6"
+ROLE_PROFILE_FORMAT_VERSION = "1.6"
+
 
 class TemplateRepository:
     """テンプレート一覧の JSON 永続化。"""
@@ -25,13 +29,21 @@ class TemplateRepository:
         data = self._read_json(self._path)
         if not data:
             return []
+        version = data.get("version", "1.0")
         items = data.get("templates", [])
         if not isinstance(items, list):
             return []
-        return [PromptTemplate.from_dict(item) for item in items if isinstance(item, dict)]
+        templates = [PromptTemplate.from_dict(item) for item in items if isinstance(item, dict)]
+        # 読み込み時に最新フォーマットで保存し直す（マイグレーション）
+        if version != TEMPLATE_FORMAT_VERSION:
+            self.save_templates(templates)
+        return templates
 
     def save_templates(self, templates: Iterable[PromptTemplate]) -> None:
-        payload = {"templates": [tpl.to_dict() for tpl in templates]}
+        payload = {
+            "version": TEMPLATE_FORMAT_VERSION,
+            "templates": [tpl.to_dict() for tpl in templates],
+        }
         self._write_json_atomic(self._path, payload)
 
     def _read_json(self, path: Path) -> dict:
@@ -78,13 +90,21 @@ class RoleProfileRepository:
         data = self._read_json(self._path)
         if not data:
             return []
+        version = data.get("version", "1.0")
         items = data.get("profiles", [])
         if not isinstance(items, list):
             return []
-        return [RoleProfile.from_dict(item) for item in items if isinstance(item, dict)]
+        profiles = [RoleProfile.from_dict(item) for item in items if isinstance(item, dict)]
+        # 読み込み時に最新フォーマットで保存し直す（マイグレーション）
+        if version != ROLE_PROFILE_FORMAT_VERSION:
+            self.save_profiles(profiles)
+        return profiles
 
     def save_profiles(self, profiles: Iterable[RoleProfile]) -> None:
-        payload = {"profiles": [profile.to_dict() for profile in profiles]}
+        payload = {
+            "version": ROLE_PROFILE_FORMAT_VERSION,
+            "profiles": [profile.to_dict() for profile in profiles],
+        }
         self._write_json_atomic(self._path, payload)
 
     def _read_json(self, path: Path) -> dict:

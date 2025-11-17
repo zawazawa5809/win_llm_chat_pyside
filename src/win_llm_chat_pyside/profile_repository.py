@@ -68,6 +68,8 @@ def save_full_config(cfg: cfg_mod.Config) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         # save_config でも原子的保存だが、Repository 内完結のAPIも提供
         import dataclasses
-        json.dump(dataclasses.asdict(cfg), f, indent=2, ensure_ascii=False)
+        data = dataclasses.asdict(cfg)
+        data["version"] = cfg_mod.CONFIG_FORMAT_VERSION
+        json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp, path)
 

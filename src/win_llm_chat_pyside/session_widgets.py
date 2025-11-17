@@ -13,10 +13,10 @@ from PySide6.QtWidgets import (
     QWidget,
     QHBoxLayout,
     QMessageBox,
-    QLineEdit,
 )
 
 from .models import SessionMeta
+from .search_widgets import SearchBarBase
 
 
 class SessionListPanel(QWidget):
@@ -38,18 +38,24 @@ class SessionListPanel(QWidget):
         self._create_button = QPushButton("新規")
         self._rename_button = QPushButton("名前変更")
         self._delete_button = QPushButton("削除")
-        self._search_input = QLineEdit()
-        self._search_input.setPlaceholderText("セッション検索 (Ctrl+Shift+F)")
-        self._search_input.setClearButtonEnabled(True)
-        self._search_input.returnPressed.connect(self._emit_search)
-        self._search_input.textChanged.connect(self._on_search_text_changed)
+        self._search_bar = SearchBarBase(
+            label_text="セッション検索:",
+            placeholder_text="名前や冒頭メッセージで検索 (Ctrl+Shift+F)",
+            show_navigation=False,
+            show_close_button=False,
+            auto_search=False,
+            search_button_text="検索",
+            parent=self,
+        )
+        self._search_bar.search_requested.connect(self._emit_search)
+        self._search_bar.line_edit().textChanged.connect(self._on_search_text_changed)
 
         self._create_button.clicked.connect(self.create_requested)
         self._rename_button.clicked.connect(self._emit_rename)
         self._delete_button.clicked.connect(self._emit_delete)
 
         layout = QVBoxLayout(self)
-        layout.addWidget(self._search_input)
+        layout.addWidget(self._search_bar)
         layout.addWidget(self._list, stretch=1)
 
         button_row = QHBoxLayout()
@@ -117,8 +123,8 @@ class SessionListPanel(QWidget):
             self.session_selected.emit(session_id)
 
     def focus_search(self) -> None:
-        self._search_input.setFocus()
-        self._search_input.selectAll()
+        self._search_bar.line_edit().setFocus()
+        self._search_bar.line_edit().selectAll()
 
     def apply_filter(self, session_ids: set[str] | None) -> None:
         self._filter_ids = session_ids
@@ -131,7 +137,7 @@ class SessionListPanel(QWidget):
         return [meta for meta in self._all_metas if meta.id in self._filter_ids]
 
     def _emit_search(self) -> None:
-        self.search_requested.emit(self._search_input.text())
+        self.search_requested.emit(self._search_bar.line_edit().text())
 
     def _on_search_text_changed(self, text: str) -> None:
         if text.strip():

@@ -9,7 +9,11 @@ import os
 from pathlib import Path
 from typing import List
 
-from .models import Message, Session, SessionMeta
+from .models import Session, SessionMeta
+
+# 現在のフォーマットバージョン
+SESSION_FORMAT_VERSION = "1.7"
+INDEX_FORMAT_VERSION = "1.6"
 
 
 class SessionRepository:
@@ -25,20 +29,55 @@ class SessionRepository:
             return []
         with open(self._index_path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        return [SessionMeta.from_dict(item) for item in raw]
+        # バージョンチェックとマイグレーション
+        items_raw: list[dict] = []
+        if isinstance(raw, dict) and "version" in raw:
+            version = raw.get("version", "1.0")
+            items_raw = raw.get("items") or raw.get("sessions") or []
+            if version != INDEX_FORMAT_VERSION:
+                # 将来のマイグレーション処理をここに追加
+                pass
+        elif isinstance(raw, list):
+            # 旧フォーマット（配列のみ）: バージョンなし
+            items_raw = raw
+        items = [item for item in items_raw if isinstance(item, dict)]
+        metas = [SessionMeta.from_dict(item) for item in items]
+        # 読み込み時に最新フォーマットで保存し直す（マイグレーション）
+        if isinstance(raw, list) or (isinstance(raw, dict) and raw.get("version") != INDEX_FORMAT_VERSION):
+            self.save_index(metas)
+        return metas
 
     def save_index(self, metas: List[SessionMeta]) -> None:
-        data = [meta.to_dict() for meta in metas]
+        data = {
+            "version": INDEX_FORMAT_VERSION,
+            "items": [meta.to_dict() for meta in metas],
+        }
         self._write_json_atomic(self._index_path, data)
 
     def load_session(self, session_id: str) -> Session:
         path = self._session_path(session_id)
         with open(path, "r", encoding="utf-8") as f:
             raw = json.load(f)
-        return Session.from_dict(raw)
+        # バージョンチェックとマイグレーション
+        if isinstance(raw, dict):
+            version = raw.get("version", "1.0")
+            session_data = raw if "id" in raw else raw.get("session", raw)
+            if version != SESSION_FORMAT_VERSION:
+                # 将来のマイグレーション処理をここに追加
+                pass
+            session = Session.from_dict(session_data)
+            # 読み込み時に最新フォーマットで保存し直す（マイグレーション）
+            if version != SESSION_FORMAT_VERSION:
+                self.save_session(session)
+            return session
+        # 旧フォーマット（バージョンフィールドなし）
+        session = Session.from_dict(raw)
+        self.save_session(session)  # マイグレーション
+        return session
 
     def save_session(self, session: Session) -> None:
         data = session.to_dict()
+        data["version"] = SESSION_FORMAT_VERSION
         path = self._session_path(session.id)
         self._write_json_atomic(path, data)
 
