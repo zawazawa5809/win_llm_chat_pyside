@@ -3,7 +3,7 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, Literal, List
+from typing import Dict, Literal, List, Optional
 
 
 @dataclass
@@ -186,6 +186,7 @@ class RoleProfile:
 
 
 AttachmentStatus = Literal["pending", "extracting", "ready", "failed"]
+AttachmentSource = Literal["user_file", "clipboard_image"]
 
 
 @dataclass
@@ -202,6 +203,8 @@ class AttachmentMetadata:
     status: AttachmentStatus = "pending"
     error_message: str | None = None
     length_warning: bool = False
+    source: AttachmentSource = "user_file"
+    stored_file_path: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -215,6 +218,8 @@ class AttachmentMetadata:
             "status": self.status,
             "error_message": self.error_message,
             "length_warning": self.length_warning,
+            "source": self.source,
+            "stored_file_path": self.stored_file_path,
         }
 
     @classmethod
@@ -230,6 +235,8 @@ class AttachmentMetadata:
             status=data.get("status", "pending"),
             error_message=data.get("error_message"),
             length_warning=bool(data.get("length_warning", False)),
+            source=data.get("source", "user_file"),
+            stored_file_path=data.get("stored_file_path"),
         )
 
 

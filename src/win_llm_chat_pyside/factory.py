@@ -2,7 +2,7 @@
 LlmClient の生成を担当するファクトリ。
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 from .client import OpenAiCompatibleClient, OllamaClient, BaseLlmClient
 from .config import Profile

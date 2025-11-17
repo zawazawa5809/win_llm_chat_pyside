@@ -71,6 +71,9 @@ class AppLogger:
     def error(self, event: str, meta: Optional[Dict[str, Any]] = None) -> None:
         self._log(logging.ERROR, event, meta)
 
+    def warning(self, event: str, meta: Optional[Dict[str, Any]] = None) -> None:
+        self._log(logging.WARNING, event, meta)
+
     def get_log_dir(self) -> Path:
         """現在のログディレクトリ（存在しなければ既定値を作成して返す）。"""
         with self._lock:
@@ -105,7 +108,7 @@ class AppLogger:
         log_dir = self.get_log_dir()
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            handler = RotatingFileHandler(
+            handler: Handler = RotatingFileHandler(
                 log_dir / "app.log",
                 maxBytes=max_bytes,
                 backupCount=backup_count,

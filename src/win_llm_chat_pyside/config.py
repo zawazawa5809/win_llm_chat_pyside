@@ -8,6 +8,11 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, Literal, List, Tuple
 
+from .layout_mode import LayoutMode
+
+# 現在の設定フォーマットバージョン
+CONFIG_FORMAT_VERSION = "1.7"
+
 
 @dataclass
 class Profile:
@@ -68,6 +73,11 @@ class Config:
     logging_max_file_size_mb: int = 5
     logging_rotation_keep_files: int = 5
     diagnostics_show_env_details: bool = False
+    layout_mode: str = LayoutMode.FOCUSED.value
+    clipboard_image_max_bytes: int = 2_000_000
+    clipboard_image_max_total_pixels: int = 8_000_000
+    clipboard_image_dir: Optional[str] = None
+    ui_main_selected_tab: str = "chat"
     
     def validate(self) -> tuple[bool, Optional[str]]:
         """
@@ -116,6 +126,19 @@ def get_data_dir() -> Path:
         return Path(appdata) / "win-llm-chat-pyside"
     # Linux/Mac（将来拡張）
     return Path.home() / ".config" / "win-llm-chat-pyside"
+
+
+def get_clipboard_image_dir(config: Optional[Config] = None) -> Path:
+    """
+    Return the directory used to store clipboard images.
+    """
+
+    if config and config.clipboard_image_dir:
+        base = Path(config.clipboard_image_dir).expanduser()
+    else:
+        base = get_data_dir() / "clipboard_images"
+    base.mkdir(parents=True, exist_ok=True)
+    return base
 
 def get_default_history_path() -> Path:
     """
@@ -183,6 +206,8 @@ def load_config() -> Config:
     try:
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+        # バージョンチェック（後方互換のため、version フィールドがなくても動作）
+        version = data.get("version", "1.0")
         # v0.5: 移行は Repository に委譲
         try:
             from . import profile_repository as repo
@@ -191,6 +216,9 @@ def load_config() -> Config:
             # フォールバック（Repository 未導入でも動作）
             cfg = _config_from_dict(data)
             _migrate_single_to_profiles_if_needed(cfg)
+        # 読み込み時に最新フォーマットで保存し直す（マイグレーション）
+        if version != CONFIG_FORMAT_VERSION:
+            save_config(cfg)
         return cfg
     except (json.JSONDecodeError, TypeError) as e:
         print(f"設定ファイルの読み込みに失敗しました: {e}")
@@ -215,7 +243,9 @@ def save_config(config: Config) -> None:
     config_path = get_config_path()
     tmp_path = config_path.with_suffix(".json.tmp")
     with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(asdict(config), f, indent=2, ensure_ascii=False)
+        data = asdict(config)
+        data["version"] = CONFIG_FORMAT_VERSION
+        json.dump(data, f, indent=2, ensure_ascii=False)
     os.replace(tmp_path, config_path)
 
 
@@ -271,6 +301,11 @@ def _config_from_dict(data: dict) -> Config:
         logging_max_file_size_mb=int(data.get("logging_max_file_size_mb", 5)),
         logging_rotation_keep_files=int(data.get("logging_rotation_keep_files", 5)),
         diagnostics_show_env_details=bool(data.get("diagnostics_show_env_details", False)),
+        layout_mode=LayoutMode.from_value(data.get("layout_mode")).value,
+        clipboard_image_max_bytes=int(data.get("clipboard_image_max_bytes", 2_000_000)),
+        clipboard_image_max_total_pixels=int(data.get("clipboard_image_max_total_pixels", 8_000_000)),
+        clipboard_image_dir=data.get("clipboard_image_dir"),
+        ui_main_selected_tab=data.get("ui_main_selected_tab", "chat"),
     )
     return cfg
 

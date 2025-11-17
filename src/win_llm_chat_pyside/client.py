@@ -4,8 +4,8 @@ LLM クライアントの抽象化と実装を提供する。
 
 from typing import Protocol, Optional, Iterator
 import builtins
-import requests
-from requests.exceptions import RequestException, Timeout, ConnectionError as RequestsConnectionError
+import requests  # type: ignore[import-untyped]
+from requests.exceptions import RequestException, Timeout, ConnectionError as RequestsConnectionError  # type: ignore[import-untyped]
 import json
 
 from .models import Message
