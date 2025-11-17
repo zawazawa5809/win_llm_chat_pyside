@@ -1,8 +1,6 @@
 from pathlib import Path
 
 import pytest
-
-from src.win_llm_chat_pyside.models import RoleProfile
 from src.win_llm_chat_pyside.prompt_repository import RoleProfileRepository
 from src.win_llm_chat_pyside.role_profile_store import RoleProfileStore
 

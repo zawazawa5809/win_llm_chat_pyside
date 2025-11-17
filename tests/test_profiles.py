@@ -2,8 +2,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from win_llm_chat_pyside import config as cfg_mod
 from win_llm_chat_pyside.factory import create_llm_client
 from win_llm_chat_pyside.client import OpenAiCompatibleClient, OllamaClient

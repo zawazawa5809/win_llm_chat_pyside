@@ -1,14 +1,6 @@
 from __future__ import annotations
 
-from typing import Callable, Optional
-
-import pytest
-
-from win_llm_chat_pyside.global_hotkey import (
-    GlobalHotkeyManager,
-    MOD_ALT,
-    MOD_CONTROL,
-)
+from win_llm_chat_pyside.global_hotkey import GlobalHotkeyManager, MOD_ALT, MOD_CONTROL
 
 
 class FakeBackend:

@@ -86,6 +86,51 @@ def test_attachment_manager_marks_failure_when_extraction_fails(tmp_path: Path):
     assert metadata.id not in reloaded.attachment_texts
 
 
+def test_attachment_manager_allows_skip_text_extraction(tmp_path: Path):
+    manager = _create_session_manager(tmp_path)
+    session_id = manager.get_active_session_id()
+    assert session_id
+    attachment_manager = AttachmentManager(
+        session_manager=manager,
+        text_extractor=ErrorExtractor(),
+    )
+    file_path = tmp_path / "image.png"
+    file_path.write_bytes(b"\x89PNG")
+
+    metadata = attachment_manager.add_attachment(
+        session_id,
+        file_path,
+        source="clipboard_image",
+        stored_file_path=str(file_path),
+        skip_text_extraction=True,
+    )
+
+    assert metadata.status == "ready"
+    assert metadata.source == "clipboard_image"
+
+
+def test_attachment_manager_removes_stored_file(tmp_path: Path):
+    manager = _create_session_manager(tmp_path)
+    session_id = manager.get_active_session_id()
+    assert session_id
+    attachment_manager = AttachmentManager(session_manager=manager)
+
+    stored_file = tmp_path / "persisted" / "img.png"
+    stored_file.parent.mkdir(exist_ok=True, parents=True)
+    stored_file.write_bytes(b"\x00\x01")
+
+    metadata = attachment_manager.add_attachment(
+        session_id,
+        stored_file,
+        source="clipboard_image",
+        stored_file_path=str(stored_file),
+        skip_text_extraction=True,
+    )
+
+    attachment_manager.remove_attachment(session_id, metadata.id)
+    assert not stored_file.exists()
+
+
 def test_file_text_extractor_reads_text_file(tmp_path: Path):
     file_path = tmp_path / "note.txt"
     file_path.write_text("こんにちは", encoding="utf-8")

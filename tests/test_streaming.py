@@ -7,8 +7,6 @@ from pathlib import Path
 from typing import Iterable, List
 from unittest.mock import patch
 
-import pytest
-
 # src/ をパスに追加（パッケージ import 用）
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 

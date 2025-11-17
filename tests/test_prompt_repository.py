@@ -1,8 +1,6 @@
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
-
 from src.win_llm_chat_pyside.models import PromptTemplate, RoleProfile
 from src.win_llm_chat_pyside.prompt_repository import (
     TemplateRepository,

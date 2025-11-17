@@ -1,4 +1,5 @@
 from win_llm_chat_pyside.config import Config, _config_from_dict
+from win_llm_chat_pyside.layout_mode import LayoutMode
 
 
 def test_config_defaults_to_not_always_on_top():
@@ -16,3 +17,40 @@ def test_config_migration_respects_existing_always_on_top():
     assert cfg.always_on_top is True
 
 
+def test_config_defaults_to_focused_layout_mode():
+    cfg = Config()
+    assert cfg.layout_mode == LayoutMode.FOCUSED.value
+
+
+def test_config_migration_preserves_layout_mode():
+    cfg = _config_from_dict({"layout_mode": LayoutMode.COMPACT.value})
+    assert cfg.layout_mode == LayoutMode.COMPACT.value
+
+
+def test_config_migration_invalid_layout_mode_falls_back():
+    cfg = _config_from_dict({"layout_mode": "unknown"})
+    assert cfg.layout_mode == LayoutMode.FOCUSED.value
+
+
+def test_config_defaults_clipboard_limits():
+    cfg = Config()
+    assert cfg.clipboard_image_max_bytes == 2_000_000
+    assert cfg.clipboard_image_max_total_pixels == 8_000_000
+
+
+def test_config_migration_respects_clipboard_settings():
+    cfg = _config_from_dict(
+        {
+            "clipboard_image_max_bytes": 1234,
+            "clipboard_image_max_total_pixels": 9876,
+            "clipboard_image_dir": "/tmp/example",
+        }
+    )
+    assert cfg.clipboard_image_max_bytes == 1234
+    assert cfg.clipboard_image_max_total_pixels == 9876
+    assert cfg.clipboard_image_dir == "/tmp/example"
+
+
+def test_config_defaults_main_and_attachment_tabs():
+    cfg = Config()
+    assert cfg.ui_main_selected_tab == "chat"

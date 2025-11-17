@@ -2,8 +2,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-import pytest
-
 from win_llm_chat_pyside import config as cfg_mod
 from win_llm_chat_pyside import profile_repository as repo
 
