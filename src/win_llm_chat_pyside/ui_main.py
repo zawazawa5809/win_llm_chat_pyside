@@ -2,16 +2,34 @@
 MainWindow と SettingsDialog を提供する GUI モジュール。
 """
 
+from datetime import timezone
 from typing import Optional, List
 from pathlib import Path
+import shutil
 from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTextBrowser, QPlainTextEdit, QPushButton, QMenuBar,
-    QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox, QFileDialog,
-    QMessageBox, QComboBox, QLabel, QInputDialog, QTabWidget,
-    QSpinBox, QDoubleSpinBox, QTextEdit
+    QMainWindow,
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTextBrowser,
+    QPlainTextEdit,
+    QPushButton,
+    QDialog,
+    QFormLayout,
+    QLineEdit,
+    QDialogButtonBox,
+    QCheckBox,
+    QFileDialog,
+    QMessageBox,
+    QComboBox,
+    QLabel,
+    QInputDialog,
+    QTabWidget,
+    QSpinBox,
+    QDoubleSpinBox,
+    QTextEdit,
 )
-from PySide6.QtCore import Qt, QObject, QEvent, QThread, QUrl
+from PySide6.QtCore import Qt, QObject, QThread, QUrl
 from PySide6.QtGui import (
     QTextCursor,
     QDesktopServices,
@@ -33,11 +51,13 @@ from .config import (
     validate_profile,
     get_sessions_dir,
     get_prompt_assets_dir,
+    get_clipboard_image_dir,
 )
-from .client import OpenAiCompatibleClient, LlmClientError
+from .client import OpenAiCompatibleClient
 from .workers import ChatWorker, StreamChatWorker
 from . import storage
 from .factory import create_llm_client
+from .clipboard_images import ClipboardImageService
 from .app_logger import app_logger
 from .diagnostics import DiagnosticsInfoProvider
 from .session_repository import SessionRepository
@@ -61,6 +81,15 @@ from .search_services import (
     AttachmentSearchInput,
 )
 from .search_widgets import SessionSearchBar, AttachmentSearchPanel
+from .shortcut_help_dialog import ShortcutHelpDialog
+from .shortcut_registry import ShortcutRegistry
+from .health_check import HealthChecker
+from .layout_mode import LayoutMode
+from .layout_mode_state import LayoutModeState
+from .main_layout import MainLayoutContainer
+from .message_composer import MessageComposerWidget, PendingClipboardImage
+from .chat_scroll_controller import ChatScrollController
+from .theme import get_theme
 
 
 class MainWindow(QMainWindow):
@@ -90,6 +119,13 @@ class MainWindow(QMainWindow):
         self._template_combo: Optional[QComboBox] = None
         self._template_insert_button: Optional[QPushButton] = None
         self.session_panel: Optional[SessionListPanel] = None
+        self.theme = get_theme()
+        self.shortcut_registry = ShortcutRegistry()
+        self._registered_global_hotkey: str | None = None
+        self._streaming_active: bool = False
+        self.layout_mode_state = LayoutModeState(self.config)
+        self.current_layout_mode: LayoutMode = self.layout_mode_state.mode
+
         assets_dir = get_prompt_assets_dir(self.config)
         self.template_repository = TemplateRepository(assets_dir)
         self.template_store = PromptTemplateStore(self.template_repository)
@@ -109,6 +145,13 @@ class MainWindow(QMainWindow):
             session_manager=self.session_manager,
             text_extractor=FileTextExtractor(),
         )
+        self._clipboard_image_dir = get_clipboard_image_dir(self.config)
+        self.clipboard_image_service = ClipboardImageService(
+            max_bytes=int(getattr(self.config, "clipboard_image_max_bytes", 2_000_000) or 2_000_000),
+            max_total_pixels=int(
+                getattr(self.config, "clipboard_image_max_total_pixels", 8_000_000) or 8_000_000
+            ),
+        )
         self.attachment_prompt_service = AttachmentPromptService(
             template_store=self.template_store,
             role_profile_store=self.role_profile_store,
@@ -119,12 +162,17 @@ class MainWindow(QMainWindow):
         self.attachment_search_service = AttachmentSearchService()
         self.session_search_bar: SessionSearchBar | None = None
         self.attachment_search_panel: AttachmentSearchPanel | None = None
+        self.main_tabs: QTabWidget | None = None
+        self._has_attachments: bool = False
         self._session_search_keyword: str = ""
         self._session_search_ranges: list[tuple[int, int]] = []
         self._session_search_current_index: int = -1
         self._session_search_expected_hits: int = 0
         self._initialize_client()
         self.attachment_widget: AttachmentListWidget | None = None
+        self.current_layout_mode: LayoutMode = LayoutMode.from_value(
+            getattr(self.config, "layout_mode", LayoutMode.FOCUSED.value)
+        )
         
         # UI構築
         self._setup_ui()
@@ -164,23 +212,19 @@ class MainWindow(QMainWindow):
         
     def _setup_ui(self):
         """UI コンポーネントを配置する。"""
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        root_layout = QHBoxLayout(central_widget)
-
         self.session_panel = SessionListPanel(self)
         self.session_panel.create_requested.connect(self._on_session_create_requested)
         self.session_panel.rename_requested.connect(self._on_session_rename_requested)
         self.session_panel.delete_requested.connect(self._on_session_delete_requested)
         self.session_panel.session_selected.connect(self._on_session_selected)
         self.session_panel.search_requested.connect(self._on_session_list_search_requested)
-        root_layout.addWidget(self.session_panel, stretch=1)
-
-        layout = QVBoxLayout()
-        root_layout.addLayout(layout, stretch=3)
 
         # プロファイル選択バー
+        chat_column = QWidget()
+        chat_layout = QVBoxLayout(chat_column)
+        chat_layout.setContentsMargins(0, 0, 0, 0)
+        chat_layout.setSpacing(8)
+
         top_bar = QHBoxLayout()
         label = QLabel("プロファイル:")
         self._profile_combo = QComboBox()
@@ -188,7 +232,7 @@ class MainWindow(QMainWindow):
         self._profile_combo.currentTextChanged.connect(self._on_profile_selected)
         top_bar.addWidget(label)
         top_bar.addWidget(self._profile_combo, stretch=1)
-        layout.addLayout(top_bar)
+        chat_layout.addLayout(top_bar)
 
         self.session_search_bar = SessionSearchBar(self)
         self.session_search_bar.setVisible(False)
@@ -196,62 +240,83 @@ class MainWindow(QMainWindow):
         self.session_search_bar.next_requested.connect(self._on_session_search_next)
         self.session_search_bar.previous_requested.connect(self._on_session_search_previous)
         self.session_search_bar.closed.connect(self._clear_session_search)
-        layout.addWidget(self.session_search_bar)
+        chat_layout.addWidget(self.session_search_bar)
         
         # チャット表示エリア（Markdown 対応）
         self.chat_view = QTextBrowser()
         self.chat_view.setMarkdown("# LLM Chat Client\n\nメッセージを入力して送信してください。")
-        layout.addWidget(self.chat_view, stretch=3)
+        self.chat_view.setStyleSheet(
+            f"""
+            QTextBrowser {{
+                background-color: {self.theme.colors.chat_bg};
+                color: {self.theme.colors.chat_text};
+                border: none;
+            }}
+            """
+        )
+        chat_layout.addWidget(self.chat_view, stretch=3)
 
-        # 添付ファイル一覧
+        self.chat_scroll_controller = ChatScrollController(
+            self.chat_view,
+            auto_scroll_enabled=bool(getattr(self.config, "ui_autoscroll_enabled", True)),
+        )
+
+        self.message_composer = MessageComposerWidget(self, theme=self.theme)
+        chat_layout.addWidget(self.message_composer)
+        self.message_composer.send_requested.connect(self._on_send_clicked)
+        self.message_composer.set_clipboard_image_service(self.clipboard_image_service)
+        self.message_composer.clipboard_image_error.connect(self._on_clipboard_image_error)
+        self.message_composer.clipboard_image_added.connect(self._on_clipboard_image_added)
+        self._apply_send_shortcut_settings()
+
+        self._template_combo = self.message_composer.template_combo
+        self._template_insert_button = self.message_composer.template_insert_button
+        self._template_insert_button.clicked.connect(self._on_template_insert_clicked)
+
+        self.input_field = self.message_composer.input_field
+        self.send_button = self.message_composer.send_button
+        self.send_button.clicked.connect(self._on_send_clicked)
+        self._stop_button = self.message_composer.stop_button
+        self._stop_button.setEnabled(False)
+        self._stop_button.clicked.connect(self._on_stop_clicked)
+
         self.attachment_widget = AttachmentListWidget(self)
         self.attachment_widget.attach_requested.connect(self._on_attachment_add)
         self.attachment_widget.summarize_requested.connect(self._on_attachment_summarize)
         self.attachment_widget.question_requested.connect(self._on_attachment_question)
         self.attachment_widget.remove_requested.connect(self._on_attachment_remove)
-        layout.addWidget(self.attachment_widget, stretch=1)
 
         self.attachment_search_panel = AttachmentSearchPanel(self)
-        self.attachment_search_panel.setVisible(False)
         self.attachment_search_panel.search_requested.connect(self._on_attachment_search_requested)
         self.attachment_search_panel.snippet_requested.connect(self._on_attachment_snippet_requested)
-        layout.addWidget(self.attachment_search_panel)
 
-        # テンプレート挿入バー
-        template_bar = QHBoxLayout()
-        template_label = QLabel("テンプレート:")
-        self._template_combo = QComboBox()
-        self._template_combo.setEditable(False)
-        self._template_combo.setPlaceholderText("テンプレートを選択...")
-        self._template_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
-        self._template_insert_button = QPushButton("挿入")
-        self._template_insert_button.clicked.connect(self._on_template_insert_clicked)
-        template_bar.addWidget(template_label)
-        template_bar.addWidget(self._template_combo, stretch=1)
-        template_bar.addWidget(self._template_insert_button)
-        layout.addLayout(template_bar)
-        
-        # 入力エリア
-        input_layout = QHBoxLayout()
-        
-        self.input_field = QPlainTextEdit()
-        self.input_field.setPlaceholderText("メッセージを入力...")
-        self.input_field.setMaximumHeight(100)
-        # Enter 改行 / Ctrl+Enter 送信
-        self.input_field.installEventFilter(self)
-        input_layout.addWidget(self.input_field, stretch=4)
-        
-        self.send_button = QPushButton("送信")
-        self.send_button.clicked.connect(self._on_send_clicked)
-        input_layout.addWidget(self.send_button, stretch=1)
+        attachments_column = QWidget()
+        attachments_layout = QVBoxLayout(attachments_column)
+        attachments_layout.setContentsMargins(0, 0, 0, 0)
+        attachments_layout.setSpacing(8)
+        attachments_layout.addWidget(self.attachment_widget, stretch=2)
+        attachments_layout.addWidget(self.attachment_search_panel, stretch=1)
 
-        # 応答停止ボタン（任意）。最初は無効化
-        self._stop_button = QPushButton("停止")
-        self._stop_button.setEnabled(False)
-        self._stop_button.clicked.connect(self._on_stop_clicked)
-        input_layout.addWidget(self._stop_button)
-        
-        layout.addLayout(input_layout)
+        self.main_tabs = QTabWidget(self)
+        self.main_tabs.addTab(chat_column, "チャット")
+        self.main_tabs.addTab(attachments_column, "添付")
+        self.main_tabs.setTabToolTip(0, "チャット（Ctrl+1）")
+        self.main_tabs.setTabToolTip(1, "添付（Ctrl+2）")
+
+        initial_main_tab = getattr(self.config, "ui_main_selected_tab", "chat")
+        if initial_main_tab == "attachments":
+            self.main_tabs.setCurrentIndex(1)
+        else:
+            self.main_tabs.setCurrentIndex(0)
+        self.main_tabs.currentChanged.connect(self._on_main_tab_changed)
+
+        self.main_layout_container = MainLayoutContainer(
+            self.session_panel,
+            self.main_tabs,
+            theme=self.theme,
+        )
+        self.setCentralWidget(self.main_layout_container)
+        self._apply_layout_mode(self.current_layout_mode, persist_config=False, update_state=False)
 
         # ステータスバー（簡易インジケータ）
         self.statusBar().showMessage("")
@@ -282,12 +347,43 @@ class MainWindow(QMainWindow):
         change_role_profile_action.triggered.connect(self._on_change_session_role_profile)
 
         help_menu = menubar.addMenu("ヘルプ")
+        shortcut_action = help_menu.addAction("ショートカットキー...")
+        shortcut_action.setShortcut(QKeySequence("F1"))
+        shortcut_action.triggered.connect(self._show_shortcut_help)
+        self._register_shortcut_meta("F1", "ショートカットヘルプを開く", "ヘルプ")
+        help_menu.addSeparator()
         logs_action = help_menu.addAction("ログフォルダを開く")
         logs_action.triggered.connect(self._open_logs_folder)
         diag_action = help_menu.addAction("診断情報...")
         diag_action.triggered.connect(self._show_diagnostics_dialog)
 
+        view_menu = menubar.addMenu("表示")
+        self.layout_mode_action = view_menu.addAction("コンパクトモード")
+        self.layout_mode_action.setCheckable(True)
+        self.layout_mode_action.triggered.connect(self._on_layout_mode_action_triggered)
+        self._sync_layout_mode_action()
+
     def _initialize_sessions(self) -> None:
+        """セッションを初期化し、必要に応じてヘルスチェックを実行する。"""
+        # 起動時に簡易ヘルスチェックを実行
+        try:
+            checker = HealthChecker(self.config)
+            result = checker.check_and_log()
+            if not result.is_healthy:
+                # 問題がある場合は警告を表示
+                issues_text = "\n".join(f"  • {issue}" for issue in result.issues)
+                warnings_text = "\n".join(f"  • {warning}" for warning in result.warnings)
+                message = "アプリケーションの設定に問題が見つかりました:\n\n"
+                if result.issues:
+                    message += "【問題】\n" + issues_text + "\n\n"
+                if result.warnings:
+                    message += "【警告】\n" + warnings_text + "\n\n"
+                message += "「ヘルプ > 診断情報...」で詳細を確認できます。"
+                QMessageBox.warning(self, "ヘルスチェック", message)
+        except Exception:
+            # ヘルスチェック自体が失敗してもアプリは続行
+            pass
+
         if not self.session_panel:
             return
         try:
@@ -330,8 +426,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(message, 5000)
             if show_dialog:
                 QMessageBox.warning(self, "グローバルホットキー", message)
+            self._update_global_hotkey_registry(None)
         elif success and enabled:
             self.statusBar().showMessage(f"グローバルホットキー: {combination}", 3000)
+            self._update_global_hotkey_registry(combination)
+        else:
+            self._update_global_hotkey_registry(None)
 
     def _apply_always_on_top(self, show_status: bool = False) -> None:
         """Config に基づいて常時最前面フラグを適用する。"""
@@ -343,10 +443,159 @@ class MainWindow(QMainWindow):
             message = "常に最前面を有効にしました" if enabled else "常に最前面を無効にしました"
             self.statusBar().showMessage(message, 3000)
 
+    def _switch_main_tab(self, name: str) -> None:
+        """Switch between main 'チャット' and '添付' tabs."""
+
+        if not self.main_tabs:
+            return
+        index = 0 if name == "chat" else 1
+        if 0 <= index < self.main_tabs.count():
+            self.main_tabs.setCurrentIndex(index)
+            self._apply_main_tab_focus(name)
+
+    def _on_main_tab_changed(self, index: int) -> None:
+        """Persist main tab selection."""
+
+        if not self.main_tabs:
+            return
+        name = "chat" if index == 0 else "attachments"
+        self.config.ui_main_selected_tab = name
+        save_config(self.config)
+        self._apply_main_tab_focus(name)
+
+    def _apply_main_tab_focus(self, name: str) -> None:
+        """Apply reasonable focus target when main tab changes."""
+
+        if name == "chat":
+            composer = getattr(self, "message_composer", None)
+            if composer is not None and getattr(composer, "input_field", None) is not None:
+                composer.input_field.setFocus(Qt.ShortcutFocusReason)
+        elif name == "attachments":
+            if self._has_attachments and self.attachment_widget is not None:
+                # 添付がある場合は一覧側にフォーカス
+                self.attachment_widget.focus_preferred_item()
+            elif self.attachment_search_panel is not None:
+                # 添付がない場合は検索入力にフォーカス
+                self.attachment_search_panel.focus_search_input()
+
     def _setup_shortcuts(self) -> None:
         """ショートカットキーを初期化する。"""
         QShortcut(QKeySequence("Ctrl+F"), self, activated=self._show_session_search_bar)
+        self._register_shortcut_meta("Ctrl+F", "セッション内検索バーを表示", "検索")
+
         QShortcut(QKeySequence("Ctrl+Shift+F"), self, activated=self._focus_session_list_search)
+        self._register_shortcut_meta("Ctrl+Shift+F", "セッション一覧検索にフォーカス", "検索")
+
+        QShortcut(QKeySequence("Ctrl+Shift+M"), self, activated=self._toggle_layout_mode_shortcut)
+        self._register_shortcut_meta("Ctrl+Shift+M", "集中／コンパクトモードを切り替え", "表示")
+
+        QShortcut(QKeySequence("Ctrl+1"), self, activated=lambda: self._switch_main_tab("chat"))
+        self._register_shortcut_meta("Ctrl+1", "チャットタブに切り替え", "表示")
+
+        QShortcut(QKeySequence("Ctrl+2"), self, activated=lambda: self._switch_main_tab("attachments"))
+        self._register_shortcut_meta("Ctrl+2", "添付タブに切り替え", "表示")
+
+    def _register_shortcut_meta(self, key: str, description: str, category: str, scope: str = "app") -> None:
+        """Register a shortcut description in the shared registry."""
+
+        try:
+            self.shortcut_registry.unregister(key)
+        except ValueError:
+            pass
+        try:
+            self.shortcut_registry.register(
+                key=key,
+                description=description,
+                category=category,
+                scope="global" if scope == "global" else "app",
+            )
+        except ValueError:
+            # 同一説明で重複する場合は既存エントリを上書きする
+            self.shortcut_registry.unregister(key)
+            self.shortcut_registry.register(
+                key=key,
+                description=description,
+                category=category,
+                scope="global" if scope == "global" else "app",
+            )
+
+    def _update_global_hotkey_registry(self, combination: str | None) -> None:
+        """Reflect the active global hotkey combination in the registry."""
+
+        if self._registered_global_hotkey:
+            self.shortcut_registry.unregister(self._registered_global_hotkey)
+            self._registered_global_hotkey = None
+        if combination:
+            self.shortcut_registry.register(
+                key=combination,
+                description="ウィンドウを前面化／最小化",
+                category="グローバルホットキー",
+                scope="global",
+            )
+            self._registered_global_hotkey = combination
+
+    def _apply_send_shortcut_settings(self) -> None:
+        """Configure composer key bindings based on current config."""
+
+        enter_to_send = bool(getattr(self.config, "ui_enter_to_send", False))
+        ctrl_enter_to_send = bool(getattr(self.config, "ui_ctrl_enter_to_send", True))
+        self.message_composer.configure_send_shortcuts(
+            enter_to_send=enter_to_send,
+            ctrl_enter_to_send=ctrl_enter_to_send,
+        )
+        if enter_to_send:
+            self._register_shortcut_meta("Enter", "メッセージを送信", "チャット")
+        else:
+            self.shortcut_registry.unregister("Enter")
+        if ctrl_enter_to_send:
+            self._register_shortcut_meta("Ctrl+Enter", "メッセージを送信", "チャット")
+        else:
+            self.shortcut_registry.unregister("Ctrl+Enter")
+
+    def _on_clipboard_image_error(self, message: str) -> None:
+        self.statusBar().showMessage(message, 5000)
+
+    def _on_clipboard_image_added(self, size_bytes: int) -> None:
+        kb = max(1, size_bytes // 1024)
+        self.statusBar().showMessage(f"画像を貼り付けました（約 {kb} KB）", 4000)
+
+    def _on_layout_mode_action_triggered(self, checked: bool) -> None:
+        mode = LayoutMode.COMPACT if checked else LayoutMode.FOCUSED
+        self._apply_layout_mode(mode, persist_config=True, update_state=True, show_status=True)
+
+    def _toggle_layout_mode_shortcut(self) -> None:
+        new_mode = self.layout_mode_state.toggle()
+        self._apply_layout_mode(new_mode, persist_config=True, update_state=False, show_status=True)
+
+    def _sync_layout_mode_action(self) -> None:
+        action = getattr(self, "layout_mode_action", None)
+        if action is None:
+            return
+        action.blockSignals(True)
+        action.setChecked(self.current_layout_mode is LayoutMode.COMPACT)
+        action.blockSignals(False)
+
+    def _apply_layout_mode(
+        self,
+        mode: LayoutMode,
+        *,
+        persist_config: bool,
+        update_state: bool,
+        show_status: bool = False,
+    ) -> None:
+        self.current_layout_mode = mode
+        if getattr(self, "main_layout_container", None):
+            self.main_layout_container.set_layout_mode(mode)
+        if getattr(self, "message_composer", None):
+            self.message_composer.set_layout_mode(mode)
+        self._sync_layout_mode_action()
+        if update_state:
+            self.layout_mode_state.set_mode(mode)
+        if persist_config:
+            save_config(self.config)
+        if show_status:
+            label = "コンパクトモード" if mode is LayoutMode.COMPACT else "集中モード"
+            self.statusBar().showMessage(f"{label}に切り替えました", 3000)
 
     def _on_session_create_requested(self) -> None:
         dialog = SessionCreateDialog(self._role_profiles_cache, self)
@@ -397,6 +646,7 @@ class MainWindow(QMainWindow):
         except ValueError as exc:
             QMessageBox.warning(self, "セッション", str(exc))
             return
+        self._cleanup_session_clipboard_dir(session_id)
         active_id = new_active or (self.session_manager.list_sessions()[0].id if self.session_manager.list_sessions() else None)
         if self.session_panel:
             self.session_panel.set_sessions(self.session_manager.list_sessions(), active_id)
@@ -405,6 +655,18 @@ class MainWindow(QMainWindow):
         else:
             self.messages = []
             self._update_chat_view()
+
+    def _cleanup_session_clipboard_dir(self, session_id: str) -> None:
+        base = getattr(self, "_clipboard_image_dir", None)
+        if not base:
+            return
+        target = base / session_id
+        try:
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+        except Exception:
+            # クリーンアップ失敗は致命ではないので握りつぶす
+            pass
 
     def _on_session_selected(self, session_id: str) -> None:
         current_id = self.session_manager.get_active_session_id()
@@ -506,6 +768,21 @@ class MainWindow(QMainWindow):
         user_input = self.input_field.toPlainText().strip()
         if not user_input:
             return
+
+        session_id = self.session_manager.get_active_session_id()
+        if not session_id:
+            QMessageBox.information(self, "送信", "アクティブなセッションがありません。")
+            return
+        try:
+            self._persist_pending_clipboard_images(session_id)
+        except Exception as exc:  # noqa: BLE001
+            self._log_and_show_error(
+                "送信",
+                "画像添付の保存に失敗しました。",
+                exc,
+                "clipboard.attach_failed",
+            )
+            return
         
         # クライアントが初期化されていない場合
         if not self.llm_client:
@@ -526,44 +803,72 @@ class MainWindow(QMainWindow):
 
         # ビュー更新（ユーザーメッセージ）＋自動スクロール
         self._update_chat_view()
-        self._scroll_to_end()
+        self.chat_scroll_controller.scroll_to_end(force=True)
 
         # アシスタント空メッセージを先行追加（逐次追記の受け皿）
         assistant_placeholder = Message(role="assistant", content="")
         self.messages.append(assistant_placeholder)
         self._update_chat_view()
-        self._scroll_to_end()
+        self.chat_scroll_controller.scroll_to_end(force=True)
 
         # ストリーミング Worker 起動
         self._start_stream_worker()
+
+    def _persist_pending_clipboard_images(self, session_id: str) -> None:
+        pending = self.message_composer.pending_clipboard_images()
+        if not pending:
+            return
+        saved = 0
+        for image in pending:
+            path = self._write_clipboard_image_file(session_id, image)
+            self.attachment_manager.add_attachment(
+                session_id,
+                path,
+                source="clipboard_image",
+                stored_file_path=str(path),
+                skip_text_extraction=True,
+            )
+            saved += 1
+        self.message_composer.clear_clipboard_images()
+        self._load_session_into_view(session_id, show_status=False)
+        self.statusBar().showMessage(f"{saved}件の画像を添付しました", 4000)
+
+    def _write_clipboard_image_file(self, session_id: str, image: PendingClipboardImage) -> Path:
+        target_dir = self._clipboard_image_dir / session_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = image.captured_at.astimezone(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        filename = f"{session_id[:8]}-clip-{timestamp}-{image.id[:6]}.png"
+        path = target_dir / filename
+        with open(path, "wb") as fp:
+            fp.write(image.data)
+        return path
     
     def _update_chat_view(self):
         """メッセージリストから Markdown を生成してビューを更新する。"""
         markdown_parts = ["# LLM Chat Client\n"]
-        
+
         for msg in self.messages:
             if msg.role == "user":
                 markdown_parts.append(f"\n**User:**\n\n{msg.content}\n")
             elif msg.role == "assistant":
                 markdown_parts.append(f"\n**Assistant:**\n\n{msg.content}\n")
-        
-        self.chat_view.setMarkdown("".join(markdown_parts))
-        self._reapply_session_search_highlight()
 
-    def _scroll_to_end(self):
-        """ビュー末尾へスクロールする。"""
-        cursor = self.chat_view.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        self.chat_view.setTextCursor(cursor)
-        self.chat_view.ensureCursorVisible()
+        # ストリーミング中も含めて setMarkdown は全文再描画になるため、
+        # 更新中の中途半端な再ペイントを抑制する。
+        self.chat_view.setUpdatesEnabled(False)
+        try:
+            self.chat_view.setMarkdown("".join(markdown_parts))
+            self._reapply_session_search_highlight()
+        finally:
+            self.chat_view.setUpdatesEnabled(True)
 
     def _update_attachment_view(self, session: Session) -> None:
         if not self.attachment_widget:
             return
         self.attachment_widget.set_attachments(session.attachments)
+        has_attachments = bool(session.attachments)
+        self._has_attachments = has_attachments
         if self.attachment_search_panel:
-            has_attachments = bool(session.attachments)
-            self.attachment_search_panel.setVisible(has_attachments)
             self.attachment_search_panel.set_attachments_available(has_attachments)
             if not has_attachments:
                 self.attachment_search_panel.update_results("", [])
@@ -870,7 +1175,7 @@ class MainWindow(QMainWindow):
         self.messages.append(Message(role="user", content=display_user_content))
         self.messages.append(Message(role="assistant", content=""))
         self._update_chat_view()
-        self._scroll_to_end()
+        self.chat_scroll_controller.scroll_to_end(force=True)
         llm_options = {
             "temperature": prompt_request.temperature,
             "top_p": prompt_request.top_p,
@@ -881,7 +1186,6 @@ class MainWindow(QMainWindow):
         """Markdown 表示の基本スタイルを適用する。"""
         ff = self.config.ui_markdown_font_family or "Segoe UI"
         fs = self.config.ui_markdown_font_size_pt or 11
-        lh = self.config.ui_markdown_line_height or 1.6
         # Qt のスタイルシートは限定的だが、基本的な要素には適用できる。
         self.chat_view.setStyleSheet(
             "QTextBrowser {"
@@ -926,6 +1230,10 @@ class MainWindow(QMainWindow):
             self._initialize_client()
             self._apply_global_hotkey_settings(show_dialog=True)
             self._apply_always_on_top(show_status=True)
+            self._apply_send_shortcut_settings()
+            self.chat_scroll_controller.set_auto_scroll_enabled(
+                bool(getattr(self.config, "ui_autoscroll_enabled", True))
+            )
 
             QMessageBox.information(self, "設定", "プロファイル設定を保存しました。")
 
@@ -1057,9 +1365,10 @@ class MainWindow(QMainWindow):
         finally:
             self._worker_thread = None
             self._worker = None
+            self._streaming_active = False
             self._set_busy(False)
             # UI 再有効化後にフォーカスを入力欄へ戻す
-            self.input_field.setFocus()
+            self.message_composer.focus_input_field()
 
     # Streaming 用
     def _start_stream_worker(
@@ -1069,6 +1378,7 @@ class MainWindow(QMainWindow):
     ):
         """バックグラウンドでストリーミング送信を開始する。"""
         messages_snapshot = list(messages_override) if messages_override is not None else list(self.messages)
+        self._streaming_active = True
         self._worker_thread = QThread(self)
         worker = StreamChatWorker(self.llm_client, messages_snapshot, llm_options=llm_options)  # type: ignore[arg-type]
         self._worker = worker
@@ -1088,9 +1398,18 @@ class MainWindow(QMainWindow):
             # 想定外だが安全側で補正
             self.messages.append(Message(role="assistant", content=""))
         self.messages[-1].content += delta
-        self._update_chat_view()
-        if self.config.ui_autoscroll_enabled:
-            self._scroll_to_end()
+        if self._streaming_active:
+            # ストリーミング中は全文 Markdown を組み直さず、末尾に増分だけ追記する。
+            cursor = self.chat_view.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            cursor.insertText(delta)
+            if self.config.ui_autoscroll_enabled:
+                self.chat_scroll_controller.scroll_to_end()
+        else:
+            # フォールバック（念のため）
+            self._update_chat_view()
+            if self.config.ui_autoscroll_enabled:
+                self.chat_scroll_controller.scroll_to_end()
 
     def _on_stream_finished(self, elapsed_ms: int):
         try:
@@ -1131,7 +1450,7 @@ class MainWindow(QMainWindow):
         self.messages.append(assistant_message)
         self._update_chat_view()
         if self.config.ui_autoscroll_enabled:
-            self._scroll_to_end()
+            self.chat_scroll_controller.scroll_to_end()
         self.input_field.clear()
         self._persist_active_session()
 
@@ -1149,25 +1468,6 @@ class MainWindow(QMainWindow):
             pass
         QMessageBox.critical(self, "通信エラー", user_message)
         self._persist_active_session()
-
-    # キーバインド（Enter 改行 / Ctrl+Enter 送信）
-    def eventFilter(self, obj: QObject, event: QEvent) -> bool:  # noqa: N802 - Qt 既定名
-        if obj is self.input_field and event.type() == QEvent.KeyPress:
-            key_event = event  # type: ignore[assignment]
-            key = key_event.key()
-            mods = key_event.modifiers()
-            # Shift+Enter は常に改行
-            if (mods & Qt.ShiftModifier) and key in (Qt.Key_Return, Qt.Key_Enter):
-                return False
-            # Ctrl+Enter で送信（設定有効時）
-            if self.config.ui_ctrl_enter_to_send and (mods & Qt.ControlModifier) and key in (Qt.Key_Return, Qt.Key_Enter):
-                self._on_send_clicked()
-                return True
-            # Enter で送信（設定有効時、修飾なし）
-            if self.config.ui_enter_to_send and (mods == Qt.NoModifier) and key in (Qt.Key_Return, Qt.Key_Enter):
-                self._on_send_clicked()
-                return True
-        return super().eventFilter(obj, event)
 
     def _check_history_limits(self) -> None:
         """履歴のソフト上限を超えた場合に非ブロッキングで通知する。"""
@@ -1247,11 +1547,38 @@ class MainWindow(QMainWindow):
                 pass
             QMessageBox.warning(self, "ログフォルダ", "ログフォルダを開けませんでした。")
 
+    def _show_shortcut_help(self) -> None:
+        """ショートカットキーヘルプダイアログを表示する。"""
+        dialog = ShortcutHelpDialog(self.shortcut_registry, self)
+        dialog.exec()
+
     def _show_diagnostics_dialog(self) -> None:
         """診断情報ダイアログを表示する。"""
         provider = DiagnosticsInfoProvider(self.config)
         info = provider.collect()
         text = provider.format_text(info)
+
+        # ヘルスチェック結果を追加
+        try:
+            checker = HealthChecker(self.config)
+            health_result = checker.check()
+            text += "\n\n=== ヘルスチェック結果 ===\n"
+            if health_result.is_healthy:
+                text += "状態: 正常\n"
+            else:
+                text += "状態: 問題あり\n"
+            if health_result.issues:
+                text += "\n【問題】\n"
+                for issue in health_result.issues:
+                    text += f"  • {issue}\n"
+            if health_result.warnings:
+                text += "\n【警告】\n"
+                for warning in health_result.warnings:
+                    text += f"  • {warning}\n"
+        except Exception:
+            text += "\n\n=== ヘルスチェック結果 ===\n"
+            text += "状態: チェック失敗\n"
+
         try:
             app_logger.info("diagnostics.opened", {"profile_name": self.config.current_profile_name or ""})
         except Exception:
