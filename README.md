@@ -34,7 +34,8 @@ python -m win_llm_chat_pyside.app
 1. アプリを起動
 2. 「設定」メニューから「接続設定...」を開く
 3. ベース URL、モデル名、API キー（任意）を設定
-4. メッセージを入力して「送信」
+4. 右ペイン上部の「チャット」タブでメッセージを入力して「送信」
+5. 添付ファイルの参照や検索を行いたい場合は右ペインの「添付」タブに切り替える（`Ctrl+1` でチャット、`Ctrl+2` で添付に切り替え可能）
 
 ## ビルド（単一 EXE）
 
@@ -79,6 +80,7 @@ pyinstaller build.spec
   - `ui_autoscroll_enabled`: 自動スクロール（既定 true）
   - `ui_streaming_stop_enabled`: 「停止」ボタン有効（既定 true）
   - `ui_markdown_*`: フォント/サイズ/行間など
+  - `ui_main_selected_tab`: 起動時に選択されるメインタブ（`"chat"` / `"attachments"`）
 
 ### 既知の制約・注意事項
 

@@ -36,6 +36,7 @@ config.json
 
 # Editor/AI assistants
 .cursor/
+.serena/
 
 # Tests and coverage
 .pytest_cache/

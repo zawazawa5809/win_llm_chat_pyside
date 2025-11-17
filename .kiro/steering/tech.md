@@ -1,6 +1,7 @@
 ---
 title: Tech Steering
 description: 技術スタック・設計判断・運用方針をパターンとして保存する
+updated_at: 2025-11-17
 ---
 
 # 技術指針（Patterns）
@@ -21,6 +22,35 @@ description: 技術スタック・設計判断・運用方針をパターンと�
 - LLM クライアントはインターフェース（`LlmClient`）＋実装（OpenAI 互換/Ollama）で抽象化。
 - 設定はユーザープロファイル配下のファイルへ保存し、既定値で初期化可能に。
 - 依存は最小限を維持し、クライアント側にサーバフレームワークは持ち込まない。
+
+## UI コンポジションとレイアウト（UI Composition & Layout）
+
+- メインウィンドウは `MainLayoutContainer` でサイドバーとチャットペインを分割し、Qt の `QSplitter` によるリサイズを前提とする。
+- レイアウトモードは `LayoutMode`（列挙）と `LayoutModeState`（Config 連動）の組み合わせで管理し、設定ファイルから現在モードを復元する。
+- テーマは `ThemeTokens`（色・タイポグラフィ・余白のトークン）と CSS ビルダ関数（例: `build_main_container_styles`, `build_composer_styles`）で一元管理する。
+- チャットコンポーザやサイドバーなどの UI 部品は「ロジックを薄く、スタイルはテーマへ集約」を基本とする。
+
+## グローバルホットキー（Global Hotkey）
+
+- Windows のグローバルホットキーは `GlobalHotkeyManager` が責務を持つ。
+  - Qt の `QAbstractNativeEventFilter` を使い、`WM_HOTKEY` をフックする。
+  - 実装は `ctypes` で `user32.dll` の `RegisterHotKey`/`UnregisterHotKey` を直接呼び出すシンプルなバックエンド。
+- OS 依存性:
+  - `sys.platform.startswith("win")` の場合のみ Win32 バックエンドを有効化し、それ以外の OS ではホットキー機能自体を無効化して安全にフォールバック。
+  - バックエンド初期化や登録に失敗してもアプリ全体は継続し、ホットキー機能のみを無効にする。
+- ホットキー設定は文字列表現（例: `"Ctrl+Alt+Space"`）をパーサ `parse_hotkey` で解析し、修飾キーと仮想キーコードへ変換する。
+
+## 観測性・診断（Observability & Diagnostics）
+
+- アプリ全体のログは `app_logger` を通じて出力し、イベント名＋ JSON メタ情報を基本とする。
+  - センシティブなキー（`prompt`, `content`, `api_key`, `token` など）は自動的に `[filtered]` にマスクされる。
+  - ログレベルは `info` / `warning` / `error` を使用し、`debug` は原則使わない（軽量クライアント方針）。
+- ログファイル:
+  - 既定の出力先は `%APPDATA%/win-llm-chat-pyside/logs/app.log`。サイズとローテーションは設定値で制御する。
+  - 詳細は `docs/LOGGING_POLICY.md` を参照し、コードは方針に従う。
+- 診断情報:
+  - `DiagnosticsInfoProvider` がアプリバージョン・Python・OS・アクティブプロファイルなどを収集し、サポート提出用のテキストへ整形する。
+  - `diagnostics_show_env_details` 設定が有効な場合のみ、データディレクトリやログディレクトリのパスを含める。
 
 ## エラーハンドリング（Error Policy）
 
