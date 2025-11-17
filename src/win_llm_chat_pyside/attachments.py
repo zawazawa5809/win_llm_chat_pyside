@@ -8,16 +8,19 @@ import mimetypes
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from .app_logger import app_logger
 from .models import AttachmentMetadata, Session
 from .session_manager import SessionManager
 
 try:  # pragma: no cover - import guard
-    from pypdf import PdfReader
+    from pypdf import PdfReader as _PdfReader  # type: ignore[import-untyped]
 except Exception:  # noqa: BLE001
-    PdfReader = None  # type: ignore[assignment]
+    _PdfReader = None  # type: ignore[assignment,misc]
+
+# 公開属性としてエクスポートし、テストから monkeypatch できるようにする
+PdfReader = _PdfReader
 
 
 class AttachmentError(Exception):
@@ -97,7 +100,15 @@ class AttachmentManager:
         session = self._session_manager.load_session(session_id)
         return list(session.attachments)
 
-    def add_attachment(self, session_id: str, file_path: Path) -> AttachmentMetadata:
+    def add_attachment(
+        self,
+        session_id: str,
+        file_path: Path,
+        *,
+        source: str = "user_file",
+        stored_file_path: str | None = None,
+        skip_text_extraction: bool = False,
+    ) -> AttachmentMetadata:
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(path)
@@ -110,9 +121,15 @@ class AttachmentManager:
             size_bytes=path.stat().st_size,
             mime_type=self._guess_mime_type(path),
             status="pending",
+            source=source,  # type: ignore[arg-type]
+            stored_file_path=stored_file_path,
         )
         session.attachments.append(metadata)
         self._session_manager.update_session(session)
+        if skip_text_extraction:
+            metadata.status = "ready"
+            self._session_manager.update_session(session)
+            return metadata
         return self._extract_and_store_text(session_id, metadata.id, path)
 
     def refresh_attachment(self, session_id: str, attachment_id: str, file_path: Path) -> AttachmentMetadata:
@@ -121,9 +138,18 @@ class AttachmentManager:
 
     def remove_attachment(self, session_id: str, attachment_id: str) -> None:
         session = self._session_manager.load_session(session_id)
-        session.attachments = [att for att in session.attachments if att.id != attachment_id]
+        removed: AttachmentMetadata | None = None
+        remaining: list[AttachmentMetadata] = []
+        for attachment in session.attachments:
+            if attachment.id == attachment_id:
+                removed = attachment
+                continue
+            remaining.append(attachment)
+        session.attachments = remaining
         session.attachment_texts.pop(attachment_id, None)
         self._session_manager.update_session(session)
+        if removed and removed.stored_file_path:
+            self._delete_stored_file(removed.stored_file_path)
 
     # ---- internal helpers ----
     def _extract_and_store_text(self, session_id: str, attachment_id: str, path: Path) -> AttachmentMetadata:
@@ -176,5 +202,17 @@ class AttachmentManager:
     @staticmethod
     def _generate_id() -> str:
         return uuid.uuid4().hex
+
+    @staticmethod
+    def _delete_stored_file(path_str: str) -> None:
+        try:
+            path = Path(path_str)
+        except Exception:
+            return
+        try:
+            if path.exists():
+                path.unlink()
+        except OSError:
+            pass
 
 

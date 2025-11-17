@@ -74,6 +74,22 @@ class AttachmentListWidget(QWidget):
             return None
         return item.data(0, Qt.UserRole)
 
+    def focus_preferred_item(self) -> None:
+        """Ensure at least one attachment is focused and scrolled into view."""
+
+        if self._tree.topLevelItemCount() == 0:
+            self._tree.clearSelection()
+            self.setFocus(Qt.FocusReason.OtherFocusReason)
+            return
+        item = self._tree.currentItem()
+        if item is None:
+            item = self._tree.topLevelItem(0)
+            if item:
+                self._tree.setCurrentItem(item)
+        if item:
+            self._tree.scrollToItem(item)
+        self._tree.setFocus(Qt.FocusReason.ShortcutFocusReason)
+
     def _emit_summarize(self) -> None:
         attachment_id = self.current_attachment_id()
         if not attachment_id:
@@ -116,6 +132,8 @@ class AttachmentListWidget(QWidget):
             details.append("長文注意")
         if attachment.error_message:
             details.append(f"エラー: {attachment.error_message}")
+        if attachment.source == "clipboard_image":
+            details.append("画像")
         return " / ".join(details)
 
 
