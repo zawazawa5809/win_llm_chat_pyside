@@ -22,7 +22,6 @@ class AttachmentListWidget(QWidget):
     attach_requested = Signal()
     remove_requested = Signal(str)
     summarize_requested = Signal(str)
-    question_requested = Signal(str)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -30,21 +29,22 @@ class AttachmentListWidget(QWidget):
         self._tree.setHeaderLabels(["ファイル名", "状態", "詳細"])
         self._tree.setColumnWidth(0, 220)
         self._tree.setSelectionMode(QTreeWidget.SingleSelection)
+        self._tree.itemChanged.connect(self._on_item_changed)
 
         self._attach_button = QPushButton("ファイルを添付")
         self._summarize_button = QPushButton("要約")
-        self._question_button = QPushButton("質問する")
+        self._clear_selection_button = QPushButton("選択解除")
         self._remove_button = QPushButton("削除")
 
         self._attach_button.clicked.connect(self.attach_requested)
         self._summarize_button.clicked.connect(self._emit_summarize)
-        self._question_button.clicked.connect(self._emit_question)
         self._remove_button.clicked.connect(self._emit_remove)
+        self._clear_selection_button.clicked.connect(self.clear_send_selection)
 
         button_row = QHBoxLayout()
         button_row.addWidget(self._attach_button)
         button_row.addWidget(self._summarize_button)
-        button_row.addWidget(self._question_button)
+        button_row.addWidget(self._clear_selection_button)
         button_row.addWidget(self._remove_button)
 
         layout = QVBoxLayout(self)
@@ -52,9 +52,14 @@ class AttachmentListWidget(QWidget):
         layout.addLayout(button_row)
 
         self._attachments: list[AttachmentMetadata] = []
+        self._selected_attachment_ids: set[str] = set()
 
     def set_attachments(self, attachments: list[AttachmentMetadata]) -> None:
         self._attachments = list(attachments)
+        valid_ids = {attachment.id for attachment in attachments}
+        self._selected_attachment_ids.intersection_update(valid_ids)
+
+        self._tree.blockSignals(True)
         self._tree.clear()
         for attachment in attachments:
             item = QTreeWidgetItem(
@@ -65,7 +70,11 @@ class AttachmentListWidget(QWidget):
                 ]
             )
             item.setData(0, Qt.UserRole, attachment.id)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            check_state = Qt.Checked if attachment.id in self._selected_attachment_ids else Qt.Unchecked
+            item.setCheckState(0, check_state)
             self._tree.addTopLevelItem(item)
+        self._tree.blockSignals(False)
         self._tree.expandAll()
 
     def current_attachment_id(self) -> str | None:
@@ -96,13 +105,6 @@ class AttachmentListWidget(QWidget):
             QMessageBox.information(self, "添付ファイル", "要約するファイルを選択してください。")
             return
         self.summarize_requested.emit(attachment_id)
-
-    def _emit_question(self) -> None:
-        attachment_id = self.current_attachment_id()
-        if not attachment_id:
-            QMessageBox.information(self, "添付ファイル", "質問するファイルを選択してください。")
-            return
-        self.question_requested.emit(attachment_id)
 
     def _emit_remove(self) -> None:
         attachment_id = self.current_attachment_id()
@@ -135,5 +137,41 @@ class AttachmentListWidget(QWidget):
         if attachment.source == "clipboard_image":
             details.append("画像")
         return " / ".join(details)
+
+    def selected_attachment_ids(self) -> list[str]:
+        """現在送信対象として選択されている添付 ID を表示順に返す。"""
+
+        ordered_ids: list[str] = []
+        for index in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(index)
+            if item and item.checkState(0) == Qt.Checked:
+                attachment_id = item.data(0, Qt.UserRole)
+                if attachment_id:
+                    ordered_ids.append(attachment_id)
+        return ordered_ids
+
+    def clear_send_selection(self) -> None:
+        """送信対象の選択状態をクリアする。"""
+
+        if not self._selected_attachment_ids:
+            return
+        self._selected_attachment_ids.clear()
+        self._tree.blockSignals(True)
+        for index in range(self._tree.topLevelItemCount()):
+            item = self._tree.topLevelItem(index)
+            if item:
+                item.setCheckState(0, Qt.Unchecked)
+        self._tree.blockSignals(False)
+
+    def _on_item_changed(self, item: QTreeWidgetItem, column: int) -> None:
+        if column != 0:
+            return
+        attachment_id = item.data(0, Qt.UserRole)
+        if not attachment_id:
+            return
+        if item.checkState(0) == Qt.Checked:
+            self._selected_attachment_ids.add(attachment_id)
+        else:
+            self._selected_attachment_ids.discard(attachment_id)
 
 

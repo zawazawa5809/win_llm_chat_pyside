@@ -54,3 +54,20 @@ def test_config_migration_respects_clipboard_settings():
 def test_config_defaults_main_and_attachment_tabs():
     cfg = Config()
     assert cfg.ui_main_selected_tab == "chat"
+
+
+def test_config_defaults_attachment_send_limits():
+    cfg = Config()
+    assert cfg.attachment_send_max_chars == 20_000
+    assert cfg.attachment_send_truncate_notice_enabled is True
+
+
+def test_config_migration_attachment_send_limits():
+    cfg = _config_from_dict(
+        {
+            "attachment_send_max_chars": 1234,
+            "attachment_send_truncate_notice_enabled": False,
+        }
+    )
+    assert cfg.attachment_send_max_chars == 1234
+    assert cfg.attachment_send_truncate_notice_enabled is False

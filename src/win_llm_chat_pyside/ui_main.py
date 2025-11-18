@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QTextEdit,
+    QFontComboBox,
 )
 from PySide6.QtCore import Qt, QObject, QThread, QUrl
 from PySide6.QtGui import (
@@ -63,6 +64,7 @@ from .diagnostics import DiagnosticsInfoProvider
 from .session_repository import SessionRepository
 from .session_manager import SessionManager
 from .session_widgets import SessionListPanel
+from .attachment_context import AttachmentContextBuilder, AttachmentContextResult
 from .attachment_widgets import AttachmentListWidget
 from .attachments import AttachmentManager, FileTextExtractor
 from .attachment_prompts import AttachmentPromptService, PromptRequest
@@ -145,6 +147,7 @@ class MainWindow(QMainWindow):
             session_manager=self.session_manager,
             text_extractor=FileTextExtractor(),
         )
+        self.attachment_context_builder = AttachmentContextBuilder()
         self._clipboard_image_dir = get_clipboard_image_dir(self.config)
         self.clipboard_image_service = ClipboardImageService(
             max_bytes=int(getattr(self.config, "clipboard_image_max_bytes", 2_000_000) or 2_000_000),
@@ -283,7 +286,6 @@ class MainWindow(QMainWindow):
         self.attachment_widget = AttachmentListWidget(self)
         self.attachment_widget.attach_requested.connect(self._on_attachment_add)
         self.attachment_widget.summarize_requested.connect(self._on_attachment_summarize)
-        self.attachment_widget.question_requested.connect(self._on_attachment_question)
         self.attachment_widget.remove_requested.connect(self._on_attachment_remove)
 
         self.attachment_search_panel = AttachmentSearchPanel(self)
@@ -794,11 +796,35 @@ class MainWindow(QMainWindow):
             )
             return
         
+        selected_attachment_ids: list[str] = []
+        if self.attachment_widget:
+            selected_attachment_ids = self.attachment_widget.selected_attachment_ids()
+
+        attachment_context_result: AttachmentContextResult | None = None
+        session_for_attachments: Session | None = None
+        included_filenames: list[str] = []
+        if selected_attachment_ids:
+            session_for_attachments = self._get_active_session_for_attachment()
+            if not session_for_attachments:
+                return
+            attachment_context_result = self.attachment_context_builder.build(
+                session_for_attachments,
+                selected_attachment_ids,
+                max_chars=int(getattr(self.config, "attachment_send_max_chars", 20_000) or 0),
+            )
+            name_map = {attachment.id: attachment.filename for attachment in session_for_attachments.attachments}
+            included_filenames = [
+                name_map.get(att_id, att_id) for att_id in attachment_context_result.included_ids
+            ]
+            self._handle_attachment_context_outcome(session_for_attachments, attachment_context_result)
+
         # 送信中は UI を無効化＋インジケータ表示
         self._set_busy(True)
         
         # ユーザーメッセージを追加
-        user_message = Message(role="user", content=user_input)
+        attachment_context_text = attachment_context_result.text if attachment_context_result else ""
+        user_payload = self._compose_user_message(user_input, included_filenames, attachment_context_text)
+        user_message = Message(role="user", content=user_payload)
         self.messages.append(user_message)
 
         # ビュー更新（ユーザーメッセージ）＋自動スクロール
@@ -849,7 +875,8 @@ class MainWindow(QMainWindow):
 
         for msg in self.messages:
             if msg.role == "user":
-                markdown_parts.append(f"\n**User:**\n\n{msg.content}\n")
+                content = self._visible_user_content(msg.content)
+                markdown_parts.append(f"\n**User:**\n\n{content}\n")
             elif msg.role == "assistant":
                 markdown_parts.append(f"\n**Assistant:**\n\n{msg.content}\n")
 
@@ -865,6 +892,7 @@ class MainWindow(QMainWindow):
     def _update_attachment_view(self, session: Session) -> None:
         if not self.attachment_widget:
             return
+        self.attachment_widget.clear_send_selection()
         self.attachment_widget.set_attachments(session.attachments)
         has_attachments = bool(session.attachments)
         self._has_attachments = has_attachments
@@ -1111,37 +1139,6 @@ class MainWindow(QMainWindow):
         display_user_content = f"[ファイル要約] {metadata.filename}"
         self._send_attachment_prompt(prompt_request, display_user_content)
 
-    def _on_attachment_question(self, attachment_id: str) -> None:
-        session = self._get_active_session_for_attachment()
-        if not session:
-            return
-        metadata = self._find_attachment(session, attachment_id)
-        if not metadata:
-            QMessageBox.warning(self, "添付ファイル", "選択した添付ファイルが見つかりません。")
-            return
-        if metadata.status != "ready":
-            QMessageBox.information(self, "添付ファイル", "テキスト抽出が完了していません。")
-            return
-        question, ok = QInputDialog.getText(self, "添付ファイルに質問", "質問内容:")
-        if not ok:
-            return
-        question = question.strip()
-        if not question:
-            QMessageBox.warning(self, "添付ファイル", "質問を入力してください。")
-            return
-        text = session.attachment_texts.get(attachment_id, "")
-        if not text:
-            QMessageBox.warning(self, "添付ファイル", "抽出済みテキストが見つかりませんでした。")
-            return
-        prompt_request = self.attachment_prompt_service.build_qa_request(
-            session,
-            metadata,
-            text,
-            question=question,
-        )
-        display_user_content = f"[ファイルへの質問] {metadata.filename}\n{question}"
-        self._send_attachment_prompt(prompt_request, display_user_content)
-
     def _get_active_session_for_attachment(self) -> Session | None:
         session_id = self.session_manager.get_active_session_id()
         if not session_id:
@@ -1181,6 +1178,76 @@ class MainWindow(QMainWindow):
             "top_p": prompt_request.top_p,
         }
         self._start_stream_worker(messages_override=prompt_request.messages, llm_options=llm_options)
+
+    def _compose_user_message(
+        self,
+        user_text: str,
+        attachment_names: list[str],
+        attachment_context: str,
+    ) -> str:
+        """LLM に渡すユーザーメッセージ本文を構築する。
+
+        - チャットペインでは本文＋添付ファイル名のみを表示する
+        - 実際の LLM には添付テキストコンテキストも含めて送信する
+        """
+
+        parts: list[str] = []
+        user_text = user_text.strip()
+        attachment_context = attachment_context.strip()
+
+        if user_text:
+            parts.append(user_text)
+        if attachment_names:
+            names = ", ".join(attachment_names)
+            parts.append(f"[添付ファイル]\n{names}")
+        if attachment_context:
+            parts.append(f"[添付コンテキスト]\n{attachment_context}")
+        return "\n\n".join(parts) if parts else user_text
+
+    def _visible_user_content(self, full_content: str) -> str:
+        """チャットペインに表示するユーザーコンテンツ部分を抽出する。
+
+        添付コンテキスト本体（[添付コンテキスト] 以降）は表示せず、
+        本文と添付ファイル名のみを表示する。
+        """
+
+        marker = "[添付コンテキスト]"
+        if marker not in full_content:
+            return full_content
+        before, _, _ = full_content.partition(marker)
+        return before.rstrip()
+
+    def _handle_attachment_context_outcome(
+        self,
+        session: Session,
+        result: AttachmentContextResult,
+    ) -> None:
+        name_map = {attachment.id: attachment.filename for attachment in session.attachments}
+        notices: list[str] = []
+        if result.included_ids:
+            included_names = ", ".join(name_map.get(att_id, att_id) for att_id in result.included_ids)
+            notices.append(f"添付付き送信: {len(result.included_ids)}件 ({included_names})")
+        if result.skipped_ids:
+            skipped_names = ", ".join(name_map.get(att_id, att_id) for att_id in result.skipped_ids)
+            notices.append(f"抽出済みテキストが見つからず送信できなかった添付: {skipped_names}")
+        if result.truncated and getattr(self.config, "attachment_send_truncate_notice_enabled", True):
+            notices.append("添付テキストが長いため一部を省略して送信しました")
+        if notices:
+            self.statusBar().showMessage(" / ".join(notices), 6000)
+
+        try:
+            app_logger.info(
+                "chat.send.attachments",
+                {
+                    "included_count": len(result.included_ids),
+                    "skipped_count": len(result.skipped_ids),
+                    "total_chars": result.total_chars,
+                    "truncated": result.truncated,
+                },
+            )
+        except Exception:
+            pass
+
 
     def _apply_markdown_style(self):
         """Markdown 表示の基本スタイルを適用する。"""
@@ -1234,6 +1301,9 @@ class MainWindow(QMainWindow):
             self.chat_scroll_controller.set_auto_scroll_enabled(
                 bool(getattr(self.config, "ui_autoscroll_enabled", True))
             )
+
+            # Markdown 表示のフォント設定を即時反映
+            self._apply_markdown_style()
 
             QMessageBox.information(self, "設定", "プロファイル設定を保存しました。")
 
@@ -1771,8 +1841,13 @@ class SettingsDialog(QDialog):
         tab = QWidget()
         layout = QFormLayout(tab)
 
-        self.font_family_field = QLineEdit()
-        self.font_family_field.setText(self._config.ui_markdown_font_family or "Segoe UI")
+        # フォントファミリ: OSインストールフォントから選択
+        self.font_family_field = QFontComboBox()
+        self.font_family_field.setEditable(False)
+        current_family = self._config.ui_markdown_font_family or "Segoe UI"
+        idx = self.font_family_field.findText(current_family)
+        if idx >= 0:
+            self.font_family_field.setCurrentIndex(idx)
         layout.addRow("Markdown フォントファミリ:", self.font_family_field)
 
         self.font_size_spin = QSpinBox()
@@ -1893,7 +1968,10 @@ class SettingsDialog(QDialog):
         cfg.always_on_top = self.always_on_top_checkbox.isChecked()
 
         # 表示・フォント
-        cfg.ui_markdown_font_family = self.font_family_field.text().strip() or "Segoe UI"
+        # QFontComboBox から現在のフォントファミリ名を取得
+        cfg.ui_markdown_font_family = (
+            self.font_family_field.currentFont().family().strip() or "Segoe UI"
+        )
         cfg.ui_markdown_font_size_pt = int(self.font_size_spin.value())
         cfg.ui_markdown_line_height = float(self.line_height_spin.value())
 

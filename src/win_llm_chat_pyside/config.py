@@ -11,7 +11,7 @@ from typing import Optional, Literal, List, Tuple
 from .layout_mode import LayoutMode
 
 # 現在の設定フォーマットバージョン
-CONFIG_FORMAT_VERSION = "1.7"
+CONFIG_FORMAT_VERSION = "1.8"
 
 
 @dataclass
@@ -78,6 +78,8 @@ class Config:
     clipboard_image_max_total_pixels: int = 8_000_000
     clipboard_image_dir: Optional[str] = None
     ui_main_selected_tab: str = "chat"
+    attachment_send_max_chars: int = 20_000
+    attachment_send_truncate_notice_enabled: bool = True
     
     def validate(self) -> tuple[bool, Optional[str]]:
         """
@@ -306,6 +308,10 @@ def _config_from_dict(data: dict) -> Config:
         clipboard_image_max_total_pixels=int(data.get("clipboard_image_max_total_pixels", 8_000_000)),
         clipboard_image_dir=data.get("clipboard_image_dir"),
         ui_main_selected_tab=data.get("ui_main_selected_tab", "chat"),
+        attachment_send_max_chars=int(data.get("attachment_send_max_chars", 20_000)),
+        attachment_send_truncate_notice_enabled=bool(
+            data.get("attachment_send_truncate_notice_enabled", True)
+        ),
     )
     return cfg
 
