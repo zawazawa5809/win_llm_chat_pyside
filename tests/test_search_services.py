@@ -19,6 +19,18 @@ def test_session_search_service_finds_hits_case_insensitive():
     assert hits[1].message_index == 1
 
 
+def test_session_search_service_handles_markdown_plain_text():
+    service = SessionSearchService()
+    messages = [
+        Message(role="assistant", content="**Bold** text with `code`"),
+    ]
+
+    hits = service.search_in_session(messages, "bold")
+
+    assert len(hits) == 1
+    assert hits[0].message_index == 0
+
+
 def test_session_search_service_searches_summaries():
     service = SessionSearchService()
     summaries = [

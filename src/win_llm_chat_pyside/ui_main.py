@@ -11,7 +11,6 @@ from PySide6.QtWidgets import (
     QWidget,
     QVBoxLayout,
     QHBoxLayout,
-    QTextBrowser,
     QPlainTextEdit,
     QPushButton,
     QDialog,
@@ -27,16 +26,14 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QSpinBox,
     QDoubleSpinBox,
-    QTextEdit,
     QFontComboBox,
 )
 from PySide6.QtCore import Qt, QObject, QThread, QUrl
 from PySide6.QtGui import (
+    QFont,
     QTextCursor,
     QDesktopServices,
     QGuiApplication,
-    QColor,
-    QTextCharFormat,
     QShortcut,
     QKeySequence,
 )
@@ -78,6 +75,7 @@ from .session_dialogs import SessionCreateDialog, RoleProfileSelectorDialog
 from .global_hotkey import GlobalHotkeyManager
 from .window_controller import WindowController
 from .search_services import (
+    SessionHit,
     SessionSearchService,
     AttachmentSearchService,
     AttachmentSearchInput,
@@ -91,6 +89,9 @@ from .layout_mode_state import LayoutModeState
 from .main_layout import MainLayoutContainer
 from .message_composer import MessageComposerWidget, PendingClipboardImage
 from .chat_scroll_controller import ChatScrollController
+from .chat_rich_text_view import ChatRichTextView
+from .chat_search_highlighter import ChatSearchHighlighter
+from .chat_streaming_updater import ChatStreamingUpdater
 from .theme import get_theme
 
 
@@ -125,6 +126,9 @@ class MainWindow(QMainWindow):
         self.shortcut_registry = ShortcutRegistry()
         self._registered_global_hotkey: str | None = None
         self._streaming_active: bool = False
+        self.chat_view: ChatRichTextView | None = None
+        self.chat_streaming_updater: ChatStreamingUpdater | None = None
+        self.chat_search_highlighter: ChatSearchHighlighter | None = None
         self.layout_mode_state = LayoutModeState(self.config)
         self.current_layout_mode: LayoutMode = self.layout_mode_state.mode
 
@@ -168,7 +172,7 @@ class MainWindow(QMainWindow):
         self.main_tabs: QTabWidget | None = None
         self._has_attachments: bool = False
         self._session_search_keyword: str = ""
-        self._session_search_ranges: list[tuple[int, int]] = []
+        self._session_search_hits: list[SessionHit] = []
         self._session_search_current_index: int = -1
         self._session_search_expected_hits: int = 0
         self._initialize_client()
@@ -179,8 +183,8 @@ class MainWindow(QMainWindow):
         
         # UI構築
         self._setup_ui()
+        self._apply_chat_font_from_config()
         self._setup_menu()
-        self._apply_markdown_style()
         self._initialize_sessions()
         self._apply_global_hotkey_settings()
         self._apply_always_on_top()
@@ -212,6 +216,17 @@ class MainWindow(QMainWindow):
             api_key=self.config.api_key,
             timeout=(connect_s, read_s)
         )
+
+    def _apply_chat_font_from_config(self) -> None:
+        """Config のフォント設定をチャットビューに反映する。"""
+        # 設定値がなければテーマ既定値でフォールバック
+        family = getattr(self.config, "ui_markdown_font_family", "") or self.theme.typography.font_family
+        size = int(getattr(self.config, "ui_markdown_font_size_pt", 0) or self.theme.typography.body_size)
+
+        font: QFont = self.chat_view.font()
+        font.setFamily(str(family))
+        font.setPointSize(size)
+        self.chat_view.setFont(font)
         
     def _setup_ui(self):
         """UI コンポーネントを配置する。"""
@@ -245,19 +260,11 @@ class MainWindow(QMainWindow):
         self.session_search_bar.closed.connect(self._clear_session_search)
         chat_layout.addWidget(self.session_search_bar)
         
-        # チャット表示エリア（Markdown 対応）
-        self.chat_view = QTextBrowser()
-        self.chat_view.setMarkdown("# LLM Chat Client\n\nメッセージを入力して送信してください。")
-        self.chat_view.setStyleSheet(
-            f"""
-            QTextBrowser {{
-                background-color: {self.theme.colors.chat_bg};
-                color: {self.theme.colors.chat_text};
-                border: none;
-            }}
-            """
-        )
+        # チャット表示（RichText ビュー）
+        self.chat_view = ChatRichTextView(theme=self.theme)
         chat_layout.addWidget(self.chat_view, stretch=3)
+        self.chat_streaming_updater = ChatStreamingUpdater(self.chat_view)
+        self.chat_search_highlighter = ChatSearchHighlighter(self.chat_view)
 
         self.chat_scroll_controller = ChatScrollController(
             self.chat_view,
@@ -870,24 +877,16 @@ class MainWindow(QMainWindow):
         return path
     
     def _update_chat_view(self):
-        """メッセージリストから Markdown を生成してビューを更新する。"""
-        markdown_parts = ["# LLM Chat Client\n"]
-
+        """メッセージリストから表示用データを生成してビューを更新する。"""
+        if not self.chat_view:
+            return
+        display_messages: list[Message] = []
         for msg in self.messages:
-            if msg.role == "user":
-                content = self._visible_user_content(msg.content)
-                markdown_parts.append(f"\n**User:**\n\n{content}\n")
-            elif msg.role == "assistant":
-                markdown_parts.append(f"\n**Assistant:**\n\n{msg.content}\n")
-
-        # ストリーミング中も含めて setMarkdown は全文再描画になるため、
-        # 更新中の中途半端な再ペイントを抑制する。
-        self.chat_view.setUpdatesEnabled(False)
-        try:
-            self.chat_view.setMarkdown("".join(markdown_parts))
-            self._reapply_session_search_highlight()
-        finally:
-            self.chat_view.setUpdatesEnabled(True)
+            display_messages.append(
+                Message(role=msg.role, content=self._display_message_content(msg))
+            )
+        self.chat_view.set_messages(display_messages)
+        self._reapply_session_search_highlight()
 
     def _update_attachment_view(self, session: Session) -> None:
         if not self.attachment_widget:
@@ -906,15 +905,17 @@ class MainWindow(QMainWindow):
         normalized = self.session_search_service.normalize_keyword(keyword)
         self._session_search_keyword = normalized
         if not self.session_search_service.is_valid_keyword(normalized):
-            self._session_search_ranges = []
+            self._session_search_hits = []
             self._session_search_current_index = -1
-            self.chat_view.setExtraSelections([])
+            if self.chat_search_highlighter:
+                self.chat_search_highlighter.clear()
             if self.session_search_bar:
                 self.session_search_bar.update_status(current=0, total=0)
             if normalized:
                 self.statusBar().showMessage("検索キーワードは2文字以上で入力してください。", 4000)
             return
         hits = self.session_search_service.search_in_session(self.messages, normalized)
+        self._session_search_hits = hits
         self._session_search_expected_hits = len(hits)
         self._apply_session_search_highlight()
         if hits:
@@ -923,63 +924,39 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("セッション内検索: 一致なし", 2000)
 
     def _on_session_search_next(self) -> None:
-        if not self._session_search_ranges:
+        if not self._session_search_hits:
             return
-        self._session_search_current_index = (self._session_search_current_index + 1) % len(self._session_search_ranges)
+        self._session_search_current_index = (self._session_search_current_index + 1) % len(self._session_search_hits)
         self._focus_session_search_hit()
 
     def _on_session_search_previous(self) -> None:
-        if not self._session_search_ranges:
+        if not self._session_search_hits:
             return
-        self._session_search_current_index = (self._session_search_current_index - 1) % len(self._session_search_ranges)
+        self._session_search_current_index = (self._session_search_current_index - 1) % len(self._session_search_hits)
         self._focus_session_search_hit()
 
     def _apply_session_search_highlight(self) -> None:
-        keyword = self._session_search_keyword
-        if not keyword:
-            self.chat_view.setExtraSelections([])
-            return
-        doc = self.chat_view.document()
-        cursor = QTextCursor(doc)
-        cursor.movePosition(QTextCursor.Start)
-        highlight_format = QTextCharFormat()
-        highlight_format.setBackground(QColor("#fff59d"))
-        selections = []
-        ranges: list[tuple[int, int]] = []
-        while True:
-            cursor = doc.find(keyword, cursor)
-            if cursor.isNull():
-                break
-            selection = QTextEdit.ExtraSelection()
-            selection.cursor = cursor
-            selection.format = highlight_format
-            selections.append(selection)
-            ranges.append((cursor.selectionStart(), cursor.selectionEnd()))
-            cursor.setPosition(cursor.selectionEnd())
-        self.chat_view.setExtraSelections(selections)
-        self._session_search_ranges = ranges
-        if not ranges:
+        if self.chat_search_highlighter:
+            self.chat_search_highlighter.apply_hits(self._session_search_hits)
+        if not self._session_search_hits:
             self._session_search_current_index = -1
-        elif self._session_search_current_index == -1 or self._session_search_current_index >= len(ranges):
+        elif self._session_search_current_index == -1 or self._session_search_current_index >= len(self._session_search_hits):
             self._session_search_current_index = 0
             self._focus_session_search_hit()
         if self.session_search_bar:
-            current = self._session_search_current_index + 1 if ranges else 0
-            self.session_search_bar.update_status(current=current, total=len(ranges))
+            current = self._session_search_current_index + 1 if self._session_search_hits else 0
+            self.session_search_bar.update_status(current=current, total=len(self._session_search_hits))
 
     def _focus_session_search_hit(self) -> None:
-        if not self._session_search_ranges:
+        if not self._session_search_hits:
             return
-        start, end = self._session_search_ranges[self._session_search_current_index]
-        cursor = self.chat_view.textCursor()
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.KeepAnchor)
-        self.chat_view.setTextCursor(cursor)
-        self.chat_view.ensureCursorVisible()
+        hit = self._session_search_hits[self._session_search_current_index]
+        if self.chat_search_highlighter:
+            self.chat_search_highlighter.focus_hit(self._session_search_current_index)
         if self.session_search_bar:
             self.session_search_bar.update_status(
                 current=self._session_search_current_index + 1,
-                total=len(self._session_search_ranges),
+                total=len(self._session_search_hits),
             )
 
     def _reapply_session_search_highlight(self) -> None:
@@ -988,9 +965,10 @@ class MainWindow(QMainWindow):
 
     def _clear_session_search(self) -> None:
         self._session_search_keyword = ""
-        self._session_search_ranges = []
+        self._session_search_hits = []
         self._session_search_current_index = -1
-        self.chat_view.setExtraSelections([])
+        if self.chat_search_highlighter:
+            self.chat_search_highlighter.clear()
         if self.session_search_bar:
             self.session_search_bar.update_status(current=0, total=0)
 
@@ -1204,6 +1182,11 @@ class MainWindow(QMainWindow):
             parts.append(f"[添付コンテキスト]\n{attachment_context}")
         return "\n\n".join(parts) if parts else user_text
 
+    def _display_message_content(self, message: Message) -> str:
+        if message.role == "user":
+            return self._visible_user_content(message.content)
+        return message.content
+
     def _visible_user_content(self, full_content: str) -> str:
         """チャットペインに表示するユーザーコンテンツ部分を抽出する。
 
@@ -1249,37 +1232,6 @@ class MainWindow(QMainWindow):
             pass
 
 
-    def _apply_markdown_style(self):
-        """Markdown 表示の基本スタイルを適用する。"""
-        ff = self.config.ui_markdown_font_family or "Segoe UI"
-        fs = self.config.ui_markdown_font_size_pt or 11
-        # Qt のスタイルシートは限定的だが、基本的な要素には適用できる。
-        self.chat_view.setStyleSheet(
-            "QTextBrowser {"
-            f"  font-family: '{ff}';"
-            f"  font-size: {fs}pt;"
-            "}"
-            "pre, code {"
-            "  font-family: 'Consolas', 'Courier New', monospace;"
-            "  background: #f6f8fa;"
-            "  border: 1px solid #e1e4e8;"
-            "  border-radius: 4px;"
-            "  padding: 4px;"
-            "}"
-            "pre {"
-            "  padding: 8px;"
-            "  margin: 6px 0;"
-            "}"
-            "table {"
-            "  border-collapse: collapse;"
-            "  margin: 6px 0;"
-            "}"
-            "th, td {"
-            "  border: 1px solid #d0d7de;"
-            "  padding: 4px 6px;"
-            "}"
-        )
-        
     def _open_settings_dialog(self):
         """プロファイル設定ダイアログを開く。"""
         dialog = SettingsDialog(self, self.config)
@@ -1302,8 +1254,8 @@ class MainWindow(QMainWindow):
                 bool(getattr(self.config, "ui_autoscroll_enabled", True))
             )
 
-            # Markdown 表示のフォント設定を即時反映
-            self._apply_markdown_style()
+            # チャットビューのフォント設定を即時反映
+            self._apply_chat_font_from_config()
 
             QMessageBox.information(self, "設定", "プロファイル設定を保存しました。")
 
@@ -1436,6 +1388,8 @@ class MainWindow(QMainWindow):
             self._worker_thread = None
             self._worker = None
             self._streaming_active = False
+            if self.chat_streaming_updater:
+                self.chat_streaming_updater.finalize()
             self._set_busy(False)
             # UI 再有効化後にフォーカスを入力欄へ戻す
             self.message_composer.focus_input_field()
@@ -1468,18 +1422,22 @@ class MainWindow(QMainWindow):
             # 想定外だが安全側で補正
             self.messages.append(Message(role="assistant", content=""))
         self.messages[-1].content += delta
-        if self._streaming_active:
-            # ストリーミング中は全文 Markdown を組み直さず、末尾に増分だけ追記する。
-            cursor = self.chat_view.textCursor()
-            cursor.movePosition(QTextCursor.End)
-            cursor.insertText(delta)
-            if self.config.ui_autoscroll_enabled:
-                self.chat_scroll_controller.scroll_to_end()
+        display_text = self._display_message_content(self.messages[-1])
+        if self.chat_streaming_updater and self.chat_view:
+            last_index = len(self.messages) - 1
+            if self.chat_scroll_controller:
+                self.chat_scroll_controller.suspend_user_tracking()
+            try:
+                if self.chat_streaming_updater.active_index != last_index:
+                    self.chat_streaming_updater.begin(message_index=last_index)
+                self.chat_streaming_updater.update_text(display_text)
+            finally:
+                if self.chat_scroll_controller:
+                    self.chat_scroll_controller.resume_user_tracking()
         else:
-            # フォールバック（念のため）
             self._update_chat_view()
-            if self.config.ui_autoscroll_enabled:
-                self.chat_scroll_controller.scroll_to_end()
+        if self.config.ui_autoscroll_enabled and self.chat_scroll_controller and not self.chat_scroll_controller.is_user_override:
+            self.chat_scroll_controller.scroll_to_end()
 
     def _on_stream_finished(self, elapsed_ms: int):
         try:
@@ -1492,6 +1450,11 @@ class MainWindow(QMainWindow):
             )
         except Exception:
             pass
+        if self.chat_streaming_updater:
+            self.chat_streaming_updater.finalize()
+        self._update_chat_view()
+        if self.config.ui_autoscroll_enabled:
+            self.chat_scroll_controller.scroll_to_end(force=True)
         self.input_field.clear()
         self._persist_active_session()
 

@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
+from .markdown_utils import markdown_to_plain_text
 from .models import Message, SessionSummary
 
 
@@ -61,8 +62,8 @@ class SessionSearchService:
         lower_keyword = normalized.casefold()
         hits: list[SessionHit] = []
         for index, message in enumerate(messages):
-            content = message.content or ""
-            lower_text = content.casefold()
+            rendered_text = markdown_to_plain_text(message.content or "")
+            lower_text = rendered_text.casefold()
             start = 0
             while True:
                 found = lower_text.find(lower_keyword, start)
