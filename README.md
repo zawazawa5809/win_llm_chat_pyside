@@ -52,12 +52,14 @@ pyinstaller build.spec
 
 ## 構成
 
-- `src/win_llm_chat_pyside/app.py`: エントリポイント
-- `src/win_llm_chat_pyside/ui_main.py`: GUI（MainWindow, SettingsDialog）
-- `src/win_llm_chat_pyside/client.py`: LLM クライアント（OpenAI 互換 / Ollama）
-- `src/win_llm_chat_pyside/config.py`: 設定管理
-- `src/win_llm_chat_pyside/models.py`: ドメインモデル（Message）
-- `src/win_llm_chat_pyside/storage.py`: 将来の履歴永続化用（スタブ）
+ソースコードは `src/win_llm_chat_pyside/` 配下に機能別に構造化されています。
+
+- `app.py`: アプリケーションエントリポイント
+- `core/`: 基盤ロジック（Config, Logger, Factory）
+- `features/`: 機能ごとのモジュール（Chat, Sessions, Attachments, Search, Prompts, Roles）
+- `services/`: インフラストラクチャ（LLM Client, Storage, Workers）
+- `ui/`: GUI コンポーネント（MainWindow, Dialogs, Styles）
+- `models/`: ドメインモデル
 
 ## 設定ファイル
 

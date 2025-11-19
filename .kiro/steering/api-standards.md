@@ -1,6 +1,7 @@
 ---
 title: API Standards
 description: OpenAI 互換（SSE）と Ollama（JSON Lines）の運用基準をパターンとして保存する
+updated_at: 2025-11-19
 ---
 
 # API 標準（Patterns）
@@ -14,63 +15,34 @@ description: OpenAI 互換（SSE）と Ollama（JSON Lines）の運用基準を�
 
 ## 共通原則（Common Principles）
 
-- エンコードは UTF-8 を強制。誤報告時も `errors="replace"` 等で継続。
-- ストリームの欠損/破損フレームはスキップ。致命でない限り全体停止を避ける。
-- タイムアウトは接続/全体の双方を制御可能とし、失敗時は非ストリーミングへフォールバック。
-- 秘密情報（API キー等）はログに出さない。トレースは簡潔に。
+- **UTF-8 強制**: エンコードは UTF-8 を明示。
+- **Robust Parsing**: 欠損/破損フレームはスキップし、全体停止を避ける。
+- **Timeout**: 接続タイムアウトとリードタイムアウトを個別に設定可能にする。
 
-## OpenAI 互換（/v1/chat/completions）
+## 実装詳細（Implementation）
 
-- メソッド/エンドポイント
-  - `POST {base_url}/v1/chat/completions`
-- リクエスト（要点）
-  - ヘッダ: `Content-Type: application/json`、任意で `Authorization: Bearer <API_KEY>`
-  - ボディ: `{"model": "<name>", "messages": [...], "stream": <bool>}`
-- 非ストリーミング応答
-  - 200 OK 時に `choices[0].message.content` を抽出
-- ストリーミング（SSE 風）
-  - 本文は `data: {json}` 行。終端は `data: [DONE]`
-  - `choices[0].delta.content` の増分を逐次反映
-- エラー分類
-  - 401/403 → AuthenticationError
-  - その他非 200 → NetworkError（本文は短く添える）
-  - JSON パース/想定外構造 → ResponseFormatError
-  - Timeout/接続系 → NetworkError
+### OpenAI 互換 (`/v1/chat/completions`)
+- **Request**: `{"model": "...", "messages": [...], "stream": true/false}`
+- **Streaming (SSE)**:
+  - `data: {...}` 行をパース。
+  - `[DONE]` で終了。
+  - `choices[0].delta.content` を取得。
 
-## Ollama（/api/chat）
+### Ollama (`/api/chat`)
+- **Request**: `{"model": "...", "messages": [...], "stream": true/false}`
+- **Streaming (JSON Lines)**:
+  - 行ごとの JSON オブジェクト。
+  - `done: true` で終了。
+  - `message.content` を取得。
 
-- メソッド/エンドポイント
-  - `POST {base_url}/api/chat`
-- リクエスト（要点）
-  - ボディ: `{"model": "<name>", "messages": [...], "stream": <bool>}`
-- 非ストリーミング応答
-  - 200 OK 時に `message.content` を抽出
-- ストリーミング（JSON Lines）
-  - 各行が JSON。代表例: `{"message": {"role": "...", "content": "..."}, "done": false}`
-  - `done: true` を受け取ったら終了
-  - `message.content` の増分を逐次反映
-- エラー分類
-  - 非 200 → NetworkError
-  - JSON パース/想定外構造 → ResponseFormatError
-  - Timeout/接続系 → NetworkError
+## エラーハンドリング
 
-## 例外分類マッピング（Error Mapping）
+1. **NetworkError**: 接続不能、タイムアウト。
+2. **AuthenticationError**: 401/403。
+3. **ResponseFormatError**: JSON パース失敗、期待するキーの欠落。
 
-- AuthenticationError: 認証/権限エラー（401/403）
-- NetworkError: 接続・タイムアウト・非 200（認証除く）
-- ResponseFormatError: 仕様上想定されるキー/配列が欠落・不正
+- **フォールバック**: ストリーミング失敗時は、可能なら非ストリーミング（一括取得）を試行するロジックを検討（必須ではないが推奨）。
 
-## フォールバック方針（Fallback Policy）
-
-- ストリーミング要求が失敗/非対応時は一括応答へフォールバックして UX を維持。
-- フォールバック自体が失敗した場合のみ例外を上位へ伝播し、UI で通知。
-
-## テスト/検証ポリシー（Testing Policy）
-
-- リクエスト組み立て（ヘッダ/ボディ）とレスポンスの最小パースをユニットテスト化。
-- 代表的な異常系（401/403、非 200、壊れたフレーム、空行多発）を再現テスト。
-
-## 互換性とバージョニング（Compatibility）
-
-- 実装は仕様に準拠しつつ寛容に解釈する（ロバストパース）。
-- 破壊的変更が必要な場合は `LlmClient` 抽象を守り、実装差分で吸収。
+## ログ・セキュリティ
+- API キーはログに出力しない（`[FILTERED]`）。
+- プロンプト内容もログレベルによっては省略する。
