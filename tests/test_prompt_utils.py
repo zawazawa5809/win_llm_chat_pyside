@@ -1,4 +1,4 @@
-from src.win_llm_chat_pyside.prompt_utils import merge_template_text
+from win_llm_chat_pyside.features.prompts.prompt_utils import merge_template_text
 
 
 def test_merge_template_text_replaces_when_empty():

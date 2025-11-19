@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import QWidget
 
-from win_llm_chat_pyside.layout_mode import LayoutMode
-from win_llm_chat_pyside.main_layout import MainLayoutContainer
+from win_llm_chat_pyside.models.layout_mode import LayoutMode
+from win_llm_chat_pyside.ui.main_layout import MainLayoutContainer
 
 
 def _create_container():

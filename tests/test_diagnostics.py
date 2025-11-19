@@ -1,5 +1,5 @@
-from win_llm_chat_pyside.config import Config, Profile
-from win_llm_chat_pyside.diagnostics import DiagnosticsInfoProvider
+from win_llm_chat_pyside.core.config import Config, Profile
+from win_llm_chat_pyside.ui.dialogs.diagnostics_dialog import DiagnosticsInfoProvider
 
 
 def test_diagnostics_basic_fields_and_profile():

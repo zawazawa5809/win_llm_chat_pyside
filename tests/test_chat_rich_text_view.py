@@ -1,4 +1,4 @@
-from win_llm_chat_pyside.chat_rich_text_view import ChatRichTextView
+from win_llm_chat_pyside.features.chat.chat_rich_text_view import ChatRichTextView
 from win_llm_chat_pyside.models import Message
 
 

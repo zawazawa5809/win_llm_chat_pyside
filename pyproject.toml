@@ -10,7 +10,7 @@ dependencies = [
 ]
 
 [project.scripts]
-llm-chat-client = "win_llm_chat_pyside.app:main"
+llm-chat-client = "win_llm_chat_pyside.core.app:main"
 
 [build-system]
 requires = ["hatchling"]

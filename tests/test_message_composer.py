@@ -3,9 +3,9 @@ from datetime import datetime, timezone
 from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QKeyEvent, QImage
 
-from win_llm_chat_pyside.clipboard_images import ClipboardImageResult
-from win_llm_chat_pyside.layout_mode import LayoutMode
-from win_llm_chat_pyside.message_composer import MessageComposerWidget
+from win_llm_chat_pyside.services.clipboard import ClipboardImageResult
+from win_llm_chat_pyside.models.layout_mode import LayoutMode
+from win_llm_chat_pyside.features.chat.message_composer import MessageComposerWidget
 
 
 def test_default_mode_is_focused(qt_app):

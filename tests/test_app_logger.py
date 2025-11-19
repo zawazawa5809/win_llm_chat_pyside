@@ -1,8 +1,8 @@
 from pathlib import Path
 import tempfile
 
-from win_llm_chat_pyside.config import Config
-from win_llm_chat_pyside.app_logger import AppLogger
+from win_llm_chat_pyside.core.config import Config
+from win_llm_chat_pyside.core.app_logger import AppLogger
 
 
 def test_app_logger_filters_sensitive_keys():

@@ -1,8 +1,8 @@
 from pathlib import Path
 import tempfile
 
-from src.win_llm_chat_pyside.models import AttachmentMetadata, Message, Session
-from src.win_llm_chat_pyside.session_repository import SessionRepository
+from win_llm_chat_pyside.models import AttachmentMetadata, Message, Session
+from win_llm_chat_pyside.features.sessions.session_repository import SessionRepository
 
 
 def _sample_session(session_id: str = "sess-1") -> Session:

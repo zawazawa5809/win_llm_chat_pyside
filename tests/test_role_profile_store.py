@@ -1,8 +1,8 @@
 from pathlib import Path
 
 import pytest
-from src.win_llm_chat_pyside.prompt_repository import RoleProfileRepository
-from src.win_llm_chat_pyside.role_profile_store import RoleProfileStore
+from win_llm_chat_pyside.features.prompts.prompt_repository import RoleProfileRepository
+from win_llm_chat_pyside.features.roles.role_profile_store import RoleProfileStore
 
 
 def test_create_profile_sets_default_when_first(tmp_path: Path):

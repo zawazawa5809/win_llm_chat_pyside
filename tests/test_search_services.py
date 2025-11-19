@@ -1,5 +1,5 @@
 from win_llm_chat_pyside.models import Message, SessionSummary
-from win_llm_chat_pyside.search_services import (
+from win_llm_chat_pyside.features.search.search_services import (
     SessionSearchService,
     AttachmentSearchService,
     AttachmentSearchInput,

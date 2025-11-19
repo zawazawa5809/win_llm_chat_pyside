@@ -1,4 +1,4 @@
-from win_llm_chat_pyside.attachment_context import AttachmentContextBuilder
+from win_llm_chat_pyside.features.attachments.attachment_context import AttachmentContextBuilder
 from win_llm_chat_pyside.models import AttachmentMetadata, Session
 
 

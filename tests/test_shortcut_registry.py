@@ -1,4 +1,4 @@
-from win_llm_chat_pyside.shortcut_registry import ShortcutRegistry
+from win_llm_chat_pyside.ui.shortcut_registry import ShortcutRegistry
 
 
 def test_register_and_list_shortcuts():

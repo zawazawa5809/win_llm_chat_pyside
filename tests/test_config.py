@@ -1,5 +1,5 @@
-from win_llm_chat_pyside.config import Config, _config_from_dict
-from win_llm_chat_pyside.layout_mode import LayoutMode
+from win_llm_chat_pyside.core.config import Config, _config_from_dict
+from win_llm_chat_pyside.models.layout_mode import LayoutMode
 
 
 def test_config_defaults_to_not_always_on_top():

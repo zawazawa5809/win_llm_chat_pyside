@@ -2,7 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from win_llm_chat_pyside import config as cfg_mod
+from win_llm_chat_pyside.core import config as cfg_mod
 from win_llm_chat_pyside import profile_repository as repo
 
 
@@ -32,7 +32,7 @@ def test_repository_save_and_read_back(tmp_path: Path, monkeypatch: Any):
     conf_path = tmp_path / "config.json"
     monkeypatch.setattr(cfg_mod, "get_config_path", lambda: conf_path)
 
-    from win_llm_chat_pyside.config import Profile
+    from win_llm_chat_pyside.core.config import Profile
     profiles = [Profile(name="a", type="openai", base_url="http://x", model="m")]
 
     # Act: 保存 → Config 経由で読み戻す

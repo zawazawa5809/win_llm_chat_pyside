@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QTreeWidget
 
-from win_llm_chat_pyside.attachment_widgets import AttachmentListWidget
+from win_llm_chat_pyside.features.attachments.attachment_widgets import AttachmentListWidget
 from win_llm_chat_pyside.models import AttachmentMetadata
 
 

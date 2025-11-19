@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from src.win_llm_chat_pyside.attachment_prompts import (
+from win_llm_chat_pyside.features.attachments.attachment_prompts import (
     AttachmentPromptService,
 )
-from src.win_llm_chat_pyside.models import AttachmentMetadata, Message, Session
-from src.win_llm_chat_pyside.prompt_repository import TemplateRepository, RoleProfileRepository
-from src.win_llm_chat_pyside.prompt_template_store import PromptTemplateStore
-from src.win_llm_chat_pyside.role_profile_store import RoleProfileStore
+from win_llm_chat_pyside.models import AttachmentMetadata, Message, Session
+from win_llm_chat_pyside.features.prompts.prompt_repository import TemplateRepository, RoleProfileRepository
+from win_llm_chat_pyside.features.prompts.prompt_template_store import PromptTemplateStore
+from win_llm_chat_pyside.features.roles.role_profile_store import RoleProfileStore
 
 
 def _create_services(tmp_path: Path) -> tuple[AttachmentPromptService, Session, AttachmentMetadata]:

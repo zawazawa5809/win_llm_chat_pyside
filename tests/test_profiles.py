@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from win_llm_chat_pyside import config as cfg_mod
-from win_llm_chat_pyside.factory import create_llm_client
-from win_llm_chat_pyside.client import OpenAiCompatibleClient, OllamaClient
+from win_llm_chat_pyside.core import config as cfg_mod
+from win_llm_chat_pyside.core.factory import create_llm_client
+from win_llm_chat_pyside.services.llm_client import OpenAiCompatibleClient, OllamaClient
 
 
 def test_migration_single_to_profiles(tmp_path: Path, monkeypatch: Any):

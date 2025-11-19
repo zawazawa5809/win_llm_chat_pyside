@@ -1,5 +1,5 @@
 from win_llm_chat_pyside.models import Message
-from win_llm_chat_pyside.ui_main import MainWindow
+from win_llm_chat_pyside.ui.main_window import MainWindow
 
 
 def test_update_chat_view_populates_rich_text_view(qt_app):

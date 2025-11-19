@@ -2,8 +2,8 @@ import json
 from pathlib import Path
 import tempfile
 
-from src.win_llm_chat_pyside.models import Message
-from src.win_llm_chat_pyside import storage
+from win_llm_chat_pyside.models import Message
+from win_llm_chat_pyside.services import storage
 
 
 def test_save_session_atomic_creates_file_and_backup():

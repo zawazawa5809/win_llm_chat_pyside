@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import QTextBrowser
 
-from win_llm_chat_pyside.chat_scroll_controller import ChatScrollController
+from win_llm_chat_pyside.features.chat.chat_scroll_controller import ChatScrollController
 
 
 def test_scroll_controller_scrolls_to_end_when_allowed(qt_app):  # noqa: ARG001

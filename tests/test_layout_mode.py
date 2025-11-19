@@ -1,4 +1,4 @@
-from win_llm_chat_pyside.layout_mode import LayoutMode
+from win_llm_chat_pyside.models.layout_mode import LayoutMode
 
 
 def test_from_value_returns_expected_enum():

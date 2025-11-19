@@ -11,7 +11,7 @@ from pathlib import Path
 # src/ をパスに追加（パッケージ import 用）
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from win_llm_chat_pyside.client import (
+from win_llm_chat_pyside.services.llm_client import (
     OpenAiCompatibleClient,
     OllamaClient,
     NetworkError,

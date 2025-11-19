@@ -1,7 +1,7 @@
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
-from win_llm_chat_pyside.clipboard_images import ClipboardImageService, persist_clipboard_image
+from win_llm_chat_pyside.services.clipboard import ClipboardImageService, persist_clipboard_image
 
 
 def _sample_image() -> QImage:

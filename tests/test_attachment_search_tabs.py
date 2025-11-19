@@ -1,6 +1,6 @@
 from PySide6.QtTest import QTest
 
-from win_llm_chat_pyside.ui_main import MainWindow
+from win_llm_chat_pyside.ui.main_window import MainWindow
 
 
 def _show_window(window: MainWindow) -> None:

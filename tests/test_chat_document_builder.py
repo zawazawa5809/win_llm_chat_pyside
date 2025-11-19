@@ -1,4 +1,4 @@
-from win_llm_chat_pyside.chat_document_builder import (
+from win_llm_chat_pyside.features.chat.chat_document_builder import (
     ChatDocumentBuilder,
     MessageDocumentRegion,
 )

@@ -3,9 +3,9 @@ from typing import List
 
 import pytest
 
-from src.win_llm_chat_pyside.models import PromptTemplate
-from src.win_llm_chat_pyside.prompt_repository import TemplateRepository
-from src.win_llm_chat_pyside.prompt_template_store import PromptTemplateStore
+from win_llm_chat_pyside.models import PromptTemplate
+from win_llm_chat_pyside.features.prompts.prompt_repository import TemplateRepository
+from win_llm_chat_pyside.features.prompts.prompt_template_store import PromptTemplateStore
 
 
 def _titles(templates: List[PromptTemplate]) -> List[str]:

@@ -1,4 +1,4 @@
-from win_llm_chat_pyside.theme import ThemeRole, build_composer_styles, get_theme
+from win_llm_chat_pyside.ui.styles.theme import ThemeRole, build_composer_styles, get_theme
 
 
 def test_get_theme_returns_expected_color_tokens():

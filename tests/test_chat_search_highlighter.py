@@ -1,7 +1,7 @@
-from win_llm_chat_pyside.chat_rich_text_view import ChatRichTextView
-from win_llm_chat_pyside.chat_search_highlighter import ChatSearchHighlighter
+from win_llm_chat_pyside.features.chat.chat_rich_text_view import ChatRichTextView
+from win_llm_chat_pyside.features.chat.chat_search_highlighter import ChatSearchHighlighter
 from win_llm_chat_pyside.models import Message
-from win_llm_chat_pyside.search_services import SessionHit
+from win_llm_chat_pyside.features.search.search_services import SessionHit
 
 
 def _prepare_view() -> ChatRichTextView:

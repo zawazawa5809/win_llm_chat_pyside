@@ -5,14 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from src.win_llm_chat_pyside.attachments import (
+from win_llm_chat_pyside.features.attachments.attachments import (
     AttachmentExtractionError,
     AttachmentManager,
     FileTextExtractor,
     ExtractionResult,
 )
-from src.win_llm_chat_pyside.session_manager import SessionManager
-from src.win_llm_chat_pyside.session_repository import SessionRepository
+from win_llm_chat_pyside.features.sessions.session_manager import SessionManager
+from win_llm_chat_pyside.features.sessions.session_repository import SessionRepository
 
 
 def _create_session_manager(tmp_path: Path) -> SessionManager:
@@ -155,7 +155,7 @@ def test_file_text_extractor_reads_pdf(monkeypatch, tmp_path: Path):
             self.pages = [DummyPage()]
 
     monkeypatch.setattr(
-        "src.win_llm_chat_pyside.attachments.PdfReader",
+        "win_llm_chat_pyside.features.attachments.attachments.PdfReader",
         DummyReader,
     )
 

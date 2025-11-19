@@ -1,6 +1,6 @@
-from win_llm_chat_pyside.config import Config
-from win_llm_chat_pyside.layout_mode import LayoutMode
-from win_llm_chat_pyside.layout_mode_state import LayoutModeState
+from win_llm_chat_pyside.core.config import Config
+from win_llm_chat_pyside.models.layout_mode import LayoutMode
+from win_llm_chat_pyside.features.chat.layout_mode_state import LayoutModeState
 
 
 def test_layout_mode_state_reads_config_value():

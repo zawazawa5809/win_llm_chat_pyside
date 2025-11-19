@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from win_llm_chat_pyside.window_controller import WindowController
+from win_llm_chat_pyside.ui.window_controller import WindowController
 
 
 class DummyWindow:

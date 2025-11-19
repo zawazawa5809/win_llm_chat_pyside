@@ -1,6 +1,5 @@
-from PySide6.QtCore import Qt
 
-from win_llm_chat_pyside.search_widgets import AttachmentSearchPanel, SearchBarBase
+from win_llm_chat_pyside.features.search.search_widgets import AttachmentSearchPanel, SearchBarBase
 
 
 def test_search_bar_base_emits_search_signal(qt_app):  # noqa: ARG001

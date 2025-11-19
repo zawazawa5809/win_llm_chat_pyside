@@ -1,10 +1,10 @@
 from pathlib import Path
 import tempfile
 
-from src.win_llm_chat_pyside import storage
-from src.win_llm_chat_pyside.models import Message
-from src.win_llm_chat_pyside.session_manager import SessionManager
-from src.win_llm_chat_pyside.session_repository import SessionRepository
+from win_llm_chat_pyside.services import storage
+from win_llm_chat_pyside.models import Message
+from win_llm_chat_pyside.features.sessions.session_manager import SessionManager
+from win_llm_chat_pyside.features.sessions.session_repository import SessionRepository
 
 
 def _create_manager(tmp_dir: Path, persist: bool = True, legacy_file: Path | None = None) -> SessionManager:
