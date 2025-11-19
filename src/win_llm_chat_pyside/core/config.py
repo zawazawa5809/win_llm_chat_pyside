@@ -119,8 +119,21 @@ def get_config_path() -> Path:
 def get_data_dir() -> Path:
     """
     アプリケーションのデータディレクトリを返す。
-    Windows: %APPDATA%/win-llm-chat-pyside
+    
+    通常時（開発時）:
+        Windows: %APPDATA%/win-llm-chat-pyside
+        Linux/Mac: ~/.config/win-llm-chat-pyside
+        
+    Frozen時（配布exe実行時）:
+        実行ファイル（.exe）と同じディレクトリ（ポータブルモード）
     """
+    import sys
+    
+    # PyInstaller等でビルドされた場合、sys.frozen が設定される
+    if getattr(sys, 'frozen', False):
+        # exeのあるディレクトリを返す
+        return Path(sys.executable).parent
+
     if os.name == "nt":  # Windows
         appdata = os.getenv("APPDATA")
         if not appdata:
