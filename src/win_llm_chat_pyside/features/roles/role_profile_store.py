@@ -12,6 +12,25 @@ from win_llm_chat_pyside.models import RoleProfile
 from win_llm_chat_pyside.features.prompts.prompt_repository import RoleProfileRepository
 
 
+DEFAULT_ROLE_PROFILES = [
+    {
+        "name": "汎用アシスタント",
+        "system_prompt": "あなたは有能で親切なアシスタントです。ユーザーの質問に対して、正確かつ簡潔に回答してください。",
+        "is_default": True,
+    },
+    {
+        "name": "プログラマー",
+        "system_prompt": "あなたは熟練したソフトウェアエンジニアです。コードの品質、可読性、保守性を重視し、ベストプラクティスに基づいた提案を行ってください。コードブロックには言語名を指定し、必要に応じてコメントを追加してください。",
+        "is_default": False,
+    },
+    {
+        "name": "校正・編集者",
+        "system_prompt": "あなたはプロの編集者です。ユーザーの文章をより明確で読みやすく、誤りのないものにするための修正案を提示してください。変更点とその理由も簡潔に説明してください。",
+        "is_default": False,
+    },
+]
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -22,7 +41,23 @@ class RoleProfileStore:
     def __init__(self, repository: RoleProfileRepository):
         self._repo = repository
         self._profiles: List[RoleProfile] = self._repo.load_profiles()
+        if not self._profiles:
+            self._init_defaults()
         self._normalize_defaults()
+
+    def _init_defaults(self) -> None:
+        now = _now()
+        for data in DEFAULT_ROLE_PROFILES:
+            profile = RoleProfile(
+                id=uuid.uuid4().hex,
+                name=data["name"],  # type: ignore
+                system_prompt=data["system_prompt"],  # type: ignore
+                created_at=now,
+                updated_at=now,
+                is_default=data["is_default"],  # type: ignore
+            )
+            self._profiles.append(profile)
+        self._persist()
 
     def list_profiles(self) -> List[RoleProfile]:
         return list(self._profiles)

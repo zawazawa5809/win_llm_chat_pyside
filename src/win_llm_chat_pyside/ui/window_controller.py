@@ -63,15 +63,20 @@ class WindowController:
 
     def show_and_focus(self) -> None:
         """ウィンドウを表示し、フォーカスを与える。"""
+        # 最小化されている場合は showNormal で復帰させるが、
+        # 単に hide() されているだけ（スナップ状態など）の場合は show() で十分であり、
+        # showNormal() を呼ぶとスナップが解除される場合があるため使い分ける。
+        if self._window.isMinimized() and hasattr(self._window, "showNormal"):
+            self._window.showNormal()
+        elif hasattr(self._window, "show"):
+            self._window.show()
+
         if self._saved_geometry is not None and hasattr(self._window, "restoreGeometry"):
             try:
                 self._window.restoreGeometry(self._saved_geometry)
             except Exception:
                 pass
-        if hasattr(self._window, "showNormal"):
-            self._window.showNormal()
-        else:
-            self._window.show()
+
         if hasattr(self._window, "raise_"):
             self._window.raise_()
         if hasattr(self._window, "activateWindow"):

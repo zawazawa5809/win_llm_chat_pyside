@@ -14,6 +14,25 @@ from win_llm_chat_pyside.features.prompts.prompt_repository import TemplateRepos
 
 SYSTEM_TEMPLATE_PREFIX = "system:"
 
+DEFAULT_TEMPLATES = [
+    {
+        "title": "要約",
+        "body": "以下のテキストを要約してください:\n\n",
+    },
+    {
+        "title": "誤字脱字修正",
+        "body": "以下のテキストの誤字脱字を修正し、より自然な表現に直してください:\n\n",
+    },
+    {
+        "title": "英訳",
+        "body": "以下のテキストを英語に翻訳してください:\n\n",
+    },
+    {
+        "title": "コード解説",
+        "body": "以下のコードの動作と意図を解説してください:\n\n",
+    },
+]
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -25,6 +44,21 @@ class PromptTemplateStore:
     def __init__(self, repository: TemplateRepository):
         self._repo = repository
         self._templates: List[PromptTemplate] = self._repo.load_templates()
+        if not self._templates:
+            self._init_defaults()
+
+    def _init_defaults(self) -> None:
+        now = _now()
+        for data in DEFAULT_TEMPLATES:
+            tpl = PromptTemplate(
+                id=uuid.uuid4().hex,
+                title=data["title"],  # type: ignore
+                body=data["body"],  # type: ignore
+                created_at=now,
+                updated_at=now,
+            )
+            self._templates.append(tpl)
+        self._persist()
 
     def list_templates(self, *, include_system: bool = False) -> List[PromptTemplate]:
         if include_system:
