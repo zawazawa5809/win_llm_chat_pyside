@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QFontComboBox,
+    QSystemTrayIcon,
 )
 from PySide6.QtCore import Qt, QObject, QThread, QUrl, QByteArray
 from PySide6.QtGui import (
@@ -93,6 +94,7 @@ from win_llm_chat_pyside.features.chat.chat_rich_text_view import ChatRichTextVi
 from win_llm_chat_pyside.features.chat.chat_search_highlighter import ChatSearchHighlighter
 from win_llm_chat_pyside.features.chat.chat_streaming_updater import ChatStreamingUpdater
 from win_llm_chat_pyside.ui.styles.theme import get_theme
+from win_llm_chat_pyside.ui.system_tray import SystemTrayManager
 
 
 class MainWindow(QMainWindow):
@@ -165,6 +167,7 @@ class MainWindow(QMainWindow):
         )
         self.window_controller = WindowController(self)
         self._restore_window_geometry()
+        self.system_tray: SystemTrayManager | None = None
         self.hotkey_manager = GlobalHotkeyManager(logger=app_logger)
         self.session_search_service = SessionSearchService()
         self.attachment_search_service = AttachmentSearchService()
@@ -186,6 +189,7 @@ class MainWindow(QMainWindow):
         self._setup_ui()
         self._apply_chat_font_from_config()
         self._setup_menu()
+        self._setup_system_tray()
         self._initialize_sessions()
         self._apply_global_hotkey_settings()
         self._apply_always_on_top()
@@ -389,6 +393,21 @@ class MainWindow(QMainWindow):
         self.layout_mode_action.triggered.connect(self._on_layout_mode_action_triggered)
         self._sync_layout_mode_action()
 
+    def _setup_system_tray(self) -> None:
+        """システムトレイアイコンを初期化する。"""
+
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        try:
+            self.system_tray = SystemTrayManager(
+                parent=self,
+                window=self,
+                window_controller=self.window_controller,
+                on_exit_requested=self.close,
+            )
+        except Exception:
+            self.system_tray = None
+
     def _initialize_sessions(self) -> None:
         """セッションを初期化し、必要に応じてヘルスチェックを実行する。"""
         # 起動時に簡易ヘルスチェックを実行
@@ -449,15 +468,28 @@ class MainWindow(QMainWindow):
         )
         if not success and enabled:
             message = error or "グローバルホットキーの登録に失敗しました。別の組み合わせを試してください。"
-            self.statusBar().showMessage(message, 5000)
+            hint = self._tray_restore_hint_text()
+            status_message = f"{message} {hint}" if hint else message
+            self.statusBar().showMessage(status_message, 5000)
             if show_dialog:
-                QMessageBox.warning(self, "グローバルホットキー", message)
+                QMessageBox.warning(self, "グローバルホットキー", status_message)
             self._update_global_hotkey_registry(None)
         elif success and enabled:
             self.statusBar().showMessage(f"グローバルホットキー: {combination}", 3000)
             self._update_global_hotkey_registry(combination)
         else:
             self._update_global_hotkey_registry(None)
+            self._show_tray_restore_hint()
+
+    def _tray_restore_hint_text(self) -> str | None:
+        if not self.system_tray or not self.system_tray.is_available:
+            return None
+        return "ホットキーが無効な場合はトレイアイコンのダブルクリックやメニューの「開く/隠す」でウィンドウを表示できます。"
+
+    def _show_tray_restore_hint(self) -> None:
+        hint = self._tray_restore_hint_text()
+        if hint:
+            self.statusBar().showMessage(hint, 6000)
 
     def _apply_always_on_top(self, show_status: bool = False) -> None:
         """Config に基づいて常時最前面フラグを適用する。"""
@@ -1598,6 +1630,11 @@ class MainWindow(QMainWindow):
             try:
                 if getattr(self, "hotkey_manager", None):
                     self.hotkey_manager.shutdown()
+            except Exception:
+                pass
+            try:
+                if getattr(self, "system_tray", None):
+                    self.system_tray.hide()
             except Exception:
                 pass
             super().closeEvent(event)
