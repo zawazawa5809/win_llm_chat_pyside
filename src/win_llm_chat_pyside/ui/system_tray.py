@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtGui import QIcon
@@ -65,4 +66,8 @@ class SystemTrayManager:
         icon = window.windowIcon()
         if not icon or icon.isNull():
             icon = QApplication.windowIcon()
+        if not icon or icon.isNull():
+            fallback_path = Path(__file__).resolve().parents[3] / "app.ico"
+            if fallback_path.exists():
+                icon = QIcon(str(fallback_path))
         return icon
