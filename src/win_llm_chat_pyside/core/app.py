@@ -41,10 +41,11 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("LLM Chat Client")
     app.setOrganizationName("win-llm-chat-pyside")
-    
+
     window = MainWindow()
-    window.show()
-    
+    if getattr(window, "should_show_on_launch", True):
+        window.show()
+
     sys.exit(app.exec())
 
 

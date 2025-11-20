@@ -81,23 +81,29 @@ class WindowController:
     def set_always_on_top(self, enabled: bool) -> None:
         """常時最前面フラグを更新する。"""
         self._always_on_top = bool(enabled)
+        was_visible = False
+        try:
+            was_visible = bool(self._window.isVisible())
+        except Exception:
+            pass
         if hasattr(self._window, "setWindowFlag"):
             try:
                 self._window.setWindowFlag(Qt.WindowStaysOnTopHint, self._always_on_top)
             except Exception:
                 return
         # Qt はフラグ変更後に再表示すると反映が確実になるため、明示的に前面化する
-        try:
-            if hasattr(self._window, "showNormal"):
-                self._window.showNormal()
-            elif hasattr(self._window, "show"):
-                self._window.show()
-            if hasattr(self._window, "raise_"):
-                self._window.raise_()
-            if hasattr(self._window, "activateWindow"):
-                self._window.activateWindow()
-        except Exception:
-            # 最前面フラグが適用できなくてもアプリ自体は落とさない
-            pass
+        if was_visible:
+            try:
+                if hasattr(self._window, "showNormal"):
+                    self._window.showNormal()
+                elif hasattr(self._window, "show"):
+                    self._window.show()
+                if hasattr(self._window, "raise_"):
+                    self._window.raise_()
+                if hasattr(self._window, "activateWindow"):
+                    self._window.activateWindow()
+            except Exception:
+                # 最前面フラグが適用できなくてもアプリ自体は落とさない
+                pass
 
 

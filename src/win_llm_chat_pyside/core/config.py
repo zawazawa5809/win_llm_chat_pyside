@@ -11,7 +11,7 @@ from typing import Optional, Literal, List, Tuple
 from win_llm_chat_pyside.models.layout_mode import LayoutMode
 
 # 現在の設定フォーマットバージョン
-CONFIG_FORMAT_VERSION = "1.8"
+CONFIG_FORMAT_VERSION = "1.9"
 
 
 @dataclass
@@ -57,6 +57,7 @@ class Config:
     global_hotkey_enabled: bool = True
     global_hotkey_combination: str = "Ctrl+Alt+Space"
     always_on_top: bool = False
+    start_minimized_to_tray: bool = False
 
     # 履歴保存/エクスポート（v0.4）
     history_enabled: bool = True
@@ -303,6 +304,7 @@ def _config_from_dict(data: dict) -> Config:
         global_hotkey_enabled=bool(data.get("global_hotkey_enabled", True)),
         global_hotkey_combination=data.get("global_hotkey_combination", "Ctrl+Alt+Space") or "Ctrl+Alt+Space",
         always_on_top=bool(data.get("always_on_top", False)),
+        start_minimized_to_tray=bool(data.get("start_minimized_to_tray", False)),
         history_enabled=bool(data.get("history_enabled", True)),
         history_format=data.get("history_format", "json"),
         history_path=data.get("history_path"),
