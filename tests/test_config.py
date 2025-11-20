@@ -2,6 +2,7 @@ from win_llm_chat_pyside.core.config import Config, _config_from_dict
 from win_llm_chat_pyside.models.layout_mode import LayoutMode
 
 
+
 def test_config_defaults_to_not_always_on_top():
     cfg = Config()
     assert cfg.always_on_top is False
@@ -15,6 +16,7 @@ def test_config_defaults_window_geometry_none():
 def test_config_migration_sets_default_when_missing():
     cfg = _config_from_dict({})
     assert cfg.always_on_top is False
+    assert cfg.start_minimized_to_tray is False
 
 
 def test_config_migration_respects_existing_always_on_top():
@@ -25,6 +27,11 @@ def test_config_migration_respects_existing_always_on_top():
 def test_config_migration_preserves_window_geometry():
     cfg = _config_from_dict({"window_geometry": "Z2VvbWV0cnk="})
     assert cfg.window_geometry == "Z2VvbWV0cnk="
+
+
+def test_config_migration_respects_existing_start_minimized_to_tray():
+    cfg = _config_from_dict({"start_minimized_to_tray": True})
+    assert cfg.start_minimized_to_tray is True
 
 
 def test_config_defaults_to_focused_layout_mode():

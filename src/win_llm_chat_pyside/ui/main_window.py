@@ -37,6 +37,7 @@ from PySide6.QtGui import (
     QGuiApplication,
     QShortcut,
     QKeySequence,
+    QIcon,
 )
 
 from win_llm_chat_pyside.models import AttachmentMetadata, Message, PromptTemplate, RoleProfile, Session
@@ -179,6 +180,11 @@ class MainWindow(QMainWindow):
         self._session_search_hits: list[SessionHit] = []
         self._session_search_current_index: int = -1
         self._session_search_expected_hits: int = 0
+        self._start_in_tray = bool(getattr(self.config, "start_minimized_to_tray", False))
+        self._tray_icon: QSystemTrayIcon | None = None
+        self._tray_menu: QMenu | None = None
+        self._tray_toggle_action = None
+        self._show_on_launch: bool = True
         self._initialize_client()
         self.attachment_widget: AttachmentListWidget | None = None
         self.current_layout_mode: LayoutMode = LayoutMode.from_value(
@@ -194,7 +200,6 @@ class MainWindow(QMainWindow):
         self._apply_global_hotkey_settings()
         self._apply_always_on_top()
         self._setup_shortcuts()
-
     def _restore_window_geometry(self) -> None:
         """Config に保存されたウィンドウジオメトリを復元する。"""
 
@@ -464,7 +469,7 @@ class MainWindow(QMainWindow):
         success, error = self.hotkey_manager.apply_settings(
             enabled,
             combination,
-            self.window_controller.toggle_visibility,
+            self._toggle_window_visibility,
         )
         if not success and enabled:
             message = error or "グローバルホットキーの登録に失敗しました。別の組み合わせを試してください。"
@@ -500,6 +505,101 @@ class MainWindow(QMainWindow):
         if show_status:
             message = "常に最前面を有効にしました" if enabled else "常に最前面を無効にしました"
             self.statusBar().showMessage(message, 3000)
+        self._update_tray_tooltip()
+
+    @property
+    def should_show_on_launch(self) -> bool:
+        """起動時にメインウィンドウを表示するかどうか。"""
+
+        return bool(getattr(self, "_show_on_launch", True))
+
+    def _toggle_window_visibility(self) -> None:
+        """ホットキーやトレイから呼び出す表示トグル。"""
+
+        if self.isVisible() and not self.isMinimized():
+            self._hide_to_tray()
+        else:
+            self._show_from_tray()
+
+    def _show_from_tray(self) -> None:
+        """ウィンドウを前面化し、トレイ状態を更新する。"""
+
+        self.window_controller.show_and_focus()
+        self._update_tray_menu_labels()
+        self._update_tray_tooltip()
+
+    def _hide_to_tray(self, initial: bool = False) -> None:
+        """ウィンドウを隠し、必要に応じてトレイに退避する。"""
+
+        if self._tray_icon:
+            self.hide()
+        else:
+            self.window_controller.minimize_or_hide()
+        if not initial:
+            self.statusBar().showMessage("ウィンドウをトレイに移動しました", 3000)
+        self._update_tray_menu_labels()
+        self._update_tray_tooltip()
+
+    def _setup_tray_icon(self) -> None:
+        """トレイ起動フラグに基づいてトレイアイコンを初期化する。"""
+
+        if not self._start_in_tray:
+            return
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            self.statusBar().showMessage("システムトレイが利用できません。通常表示で起動します。", 5000)
+            self._show_on_launch = True
+            return
+        icon = self._load_tray_icon()
+        self._tray_icon = QSystemTrayIcon(icon, self)
+        self._tray_menu = QMenu(self)
+        self._tray_toggle_action = self._tray_menu.addAction("ウィンドウを表示")
+        self._tray_toggle_action.triggered.connect(self._on_tray_toggle_action)
+        quit_action = self._tray_menu.addAction("終了")
+        quit_action.triggered.connect(self.close)
+        self._tray_icon.setContextMenu(self._tray_menu)
+        self._tray_icon.activated.connect(self._on_tray_activated)
+        self._tray_icon.show()
+        self._show_on_launch = False
+        self._hide_to_tray(initial=True)
+        self._update_tray_menu_labels()
+        self._update_tray_tooltip()
+
+    def _on_tray_toggle_action(self) -> None:
+        self._toggle_window_visibility()
+
+    def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self._show_from_tray()
+
+    def _update_tray_menu_labels(self) -> None:
+        if not self._tray_toggle_action:
+            return
+        visible = self.isVisible() and not self.isMinimized()
+        self._tray_toggle_action.setText("ウィンドウを隠す" if visible else "ウィンドウを表示")
+
+    def _update_tray_tooltip(self) -> None:
+        if not self._tray_icon:
+            return
+        visibility = "表示中" if self.isVisible() and not self.isMinimized() else "トレイ待機中"
+        hotkey_enabled = bool(getattr(self.config, "global_hotkey_enabled", True))
+        hotkey = getattr(self.config, "global_hotkey_combination", "Ctrl+Alt+Space") or "Ctrl+Alt+Space"
+        hotkey_state = hotkey if hotkey_enabled else "無効"
+        always_on_top = "オン" if getattr(self.config, "always_on_top", False) else "オフ"
+        tooltip = (
+            "LLM Chat Client\n"
+            f"状態: {visibility}\n"
+            f"ホットキー: {hotkey_state}\n"
+            f"常に最前面: {always_on_top}"
+        )
+        self._tray_icon.setToolTip(tooltip)
+
+    def _load_tray_icon(self) -> QIcon:
+        icon_path = Path(__file__).resolve().parents[3] / "app.ico"
+        if icon_path.exists():
+            return QIcon(str(icon_path))
+        if not self.windowIcon().isNull():
+            return self.windowIcon()
+        return self.style().standardIcon(QStyle.SP_DesktopIcon)
 
     def _persist_window_geometry(self) -> None:
         """現在のウィンドウジオメトリを Config に保存する。"""
@@ -1855,6 +1955,10 @@ class SettingsDialog(QDialog):
         self.hotkey_combination_field.setText(getattr(self._config, "global_hotkey_combination", "Ctrl+Alt+Space"))
         layout.addRow("ホットキー（例: Ctrl+Alt+Space）:", self.hotkey_combination_field)
 
+        self.start_minimized_checkbox = QCheckBox("起動時にトレイへ格納して開始する")
+        self.start_minimized_checkbox.setChecked(bool(getattr(self._config, "start_minimized_to_tray", False)))
+        layout.addRow(self.start_minimized_checkbox)
+
         self.always_on_top_checkbox = QCheckBox("常に最前面に表示する")
         self.always_on_top_checkbox.setChecked(bool(getattr(self._config, "always_on_top", False)))
         layout.addRow(self.always_on_top_checkbox)
@@ -2020,6 +2124,7 @@ class SettingsDialog(QDialog):
         cfg.global_hotkey_enabled = self.hotkey_enabled_checkbox.isChecked()
         hotkey_text = self.hotkey_combination_field.text().strip() or "Ctrl+Alt+Space"
         cfg.global_hotkey_combination = hotkey_text
+        cfg.start_minimized_to_tray = self.start_minimized_checkbox.isChecked()
         cfg.always_on_top = self.always_on_top_checkbox.isChecked()
 
         # 表示・フォント

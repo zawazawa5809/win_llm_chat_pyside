@@ -58,6 +58,7 @@ class Config:
     global_hotkey_combination: str = "Ctrl+Alt+Space"
     always_on_top: bool = False
     window_geometry: Optional[str] = None
+    start_minimized_to_tray: bool = False
 
     # 履歴保存/エクスポート（v0.4）
     history_enabled: bool = True
@@ -305,6 +306,7 @@ def _config_from_dict(data: dict) -> Config:
         global_hotkey_combination=data.get("global_hotkey_combination", "Ctrl+Alt+Space") or "Ctrl+Alt+Space",
         always_on_top=bool(data.get("always_on_top", False)),
         window_geometry=data.get("window_geometry"),
+        start_minimized_to_tray=bool(data.get("start_minimized_to_tray", False)),
         history_enabled=bool(data.get("history_enabled", True)),
         history_format=data.get("history_format", "json"),
         history_path=data.get("history_path"),
