@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFontComboBox,
 )
-from PySide6.QtCore import Qt, QObject, QThread, QUrl
+from PySide6.QtCore import Qt, QObject, QThread, QUrl, QByteArray
 from PySide6.QtGui import (
     QFont,
     QTextCursor,
@@ -164,6 +164,7 @@ class MainWindow(QMainWindow):
             role_profile_store=self.role_profile_store,
         )
         self.window_controller = WindowController(self)
+        self._restore_window_geometry()
         self.hotkey_manager = GlobalHotkeyManager(logger=app_logger)
         self.session_search_service = SessionSearchService()
         self.attachment_search_service = AttachmentSearchService()
@@ -189,6 +190,22 @@ class MainWindow(QMainWindow):
         self._apply_global_hotkey_settings()
         self._apply_always_on_top()
         self._setup_shortcuts()
+
+    def _restore_window_geometry(self) -> None:
+        """Config に保存されたウィンドウジオメトリを復元する。"""
+
+        geometry_b64 = getattr(self.config, "window_geometry", None) or ""
+        if not geometry_b64:
+            return
+        try:
+            geometry = QByteArray.fromBase64(str(geometry_b64).encode("utf-8"))
+            if geometry and not geometry.isEmpty():
+                self.restoreGeometry(geometry)
+                if getattr(self, "window_controller", None):
+                    self.window_controller.set_saved_geometry(geometry)
+        except Exception:
+            # ジオメトリ復元失敗は起動の致命傷ではない
+            pass
         
     def _initialize_client(self):
         """設定から LLM クライアントを初期化する。"""
@@ -451,6 +468,28 @@ class MainWindow(QMainWindow):
         if show_status:
             message = "常に最前面を有効にしました" if enabled else "常に最前面を無効にしました"
             self.statusBar().showMessage(message, 3000)
+
+    def _persist_window_geometry(self) -> None:
+        """現在のウィンドウジオメトリを Config に保存する。"""
+
+        try:
+            geometry = self.saveGeometry()
+        except Exception:
+            return
+        if not geometry or geometry.isEmpty():
+            return
+        try:
+            geometry_b64 = bytes(geometry.toBase64()).decode("utf-8")
+        except Exception:
+            return
+        if getattr(self.config, "window_geometry", None) != geometry_b64:
+            self.config.window_geometry = geometry_b64
+            save_config(self.config)
+        if getattr(self, "window_controller", None):
+            try:
+                self.window_controller.set_saved_geometry(geometry)
+            except Exception:
+                pass
 
     def _switch_main_tab(self, name: str) -> None:
         """Switch between main 'チャット' and '添付' tabs."""
@@ -1527,6 +1566,18 @@ class MainWindow(QMainWindow):
             return Path(cfg_path)
         return get_default_history_path()
 
+    def resizeEvent(self, event):  # noqa: N802 - Qt 既定名
+        """リサイズ時にジオメトリを保存する。"""
+
+        super().resizeEvent(event)
+        self._persist_window_geometry()
+
+    def moveEvent(self, event):  # noqa: N802 - Qt 既定名
+        """移動時にジオメトリを保存する。"""
+
+        super().moveEvent(event)
+        self._persist_window_geometry()
+
     def closeEvent(self, event):  # noqa: N802 - Qt 既定名
         """ウィンドウクローズ時にアクティブセッションを保存する。"""
         try:
@@ -1538,6 +1589,10 @@ class MainWindow(QMainWindow):
         finally:
             try:
                 app_logger.info("app.exit", {"profile_name": self.config.current_profile_name or ""})
+            except Exception:
+                pass
+            try:
+                self._persist_window_geometry()
             except Exception:
                 pass
             try:

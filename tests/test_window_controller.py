@@ -14,6 +14,8 @@ class DummyWindow:
         self.show_minimized_calls = 0
         self.hide_calls = 0
         self.window_flag_calls: list[tuple[str, bool]] = []
+        self.saved_geometry: bytes | None = None
+        self.restore_calls = 0
 
     def isVisible(self) -> bool:  # noqa: N802 - Qt 互換シグネチャ
         return self.visible
@@ -50,6 +52,15 @@ class DummyWindow:
 
     def setWindowFlag(self, flag, enabled):  # noqa: N802
         self.window_flag_calls.append((flag, bool(enabled)))
+
+    def saveGeometry(self):  # noqa: N802
+        self.saved_geometry = b"geometry"
+        return self.saved_geometry
+
+    def restoreGeometry(self, geometry):  # noqa: N802
+        self.restore_calls += 1
+        self.saved_geometry = geometry
+        return True
 
 
 def test_toggle_visibility_shows_window_when_hidden():
@@ -89,5 +100,21 @@ def test_set_always_on_top_updates_window_flag():
     controller.set_always_on_top(False)
     _, enabled = window.window_flag_calls[-1]
     assert enabled is False
+
+
+def test_show_and_focus_restores_saved_geometry_before_show():
+    window = DummyWindow(visible=True, active=True, minimized=False)
+    controller = WindowController(window)
+
+    controller.minimize_or_hide()
+    # ジオメトリが保存されていること
+    assert window.saved_geometry == b"geometry"
+
+    # 連続呼び出しで showNormal の前に restoreGeometry が呼ばれる
+    controller.show_and_focus()
+
+    assert window.restore_calls == 1
+    assert window.saved_geometry == b"geometry"
+    assert window.show_normal_calls >= 1
 
 

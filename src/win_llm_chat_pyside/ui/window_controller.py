@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 from PySide6.QtCore import Qt
 
@@ -35,6 +35,12 @@ class _QtWindowLike(Protocol):
     def hide(self) -> None:
         ...
 
+    def saveGeometry(self) -> Any:  # noqa: N802 - Qt シグネチャ
+        ...
+
+    def restoreGeometry(self, geometry: Any) -> bool:  # noqa: N802
+        ...
+
 
 class WindowController:
     """
@@ -46,6 +52,7 @@ class WindowController:
     def __init__(self, window: _QtWindowLike):
         self._window = window
         self._always_on_top = False
+        self._saved_geometry: Any | None = None
 
     def toggle_visibility(self) -> None:
         """アクティブなら最小化、非表示なら前面化する。"""
@@ -56,6 +63,11 @@ class WindowController:
 
     def show_and_focus(self) -> None:
         """ウィンドウを表示し、フォーカスを与える。"""
+        if self._saved_geometry is not None and hasattr(self._window, "restoreGeometry"):
+            try:
+                self._window.restoreGeometry(self._saved_geometry)
+            except Exception:
+                pass
         if hasattr(self._window, "showNormal"):
             self._window.showNormal()
         else:
@@ -67,10 +79,20 @@ class WindowController:
 
     def minimize_or_hide(self) -> None:
         """最小化できるなら最小化、出来なければ隠す。"""
+        if hasattr(self._window, "saveGeometry"):
+            try:
+                self._saved_geometry = self._window.saveGeometry()
+            except Exception:
+                self._saved_geometry = None
         if hasattr(self._window, "showMinimized"):
             self._window.showMinimized()
         elif hasattr(self._window, "hide"):
             self._window.hide()
+
+    def set_saved_geometry(self, geometry: Any | None) -> None:
+        """外部で取得したジオメトリを保持する。"""
+
+        self._saved_geometry = geometry
 
     def _is_visible_and_active(self) -> bool:
         try:
